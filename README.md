@@ -1,180 +1,143 @@
 <p align="center">
-  <img src="Resources/AppIcon.png" alt="CallCaption Logo" width="160" height="160" style="border-radius: 36px; box-shadow: 0 16px 36px rgba(0,0,0,0.35);">
+  <img src="Resources/AppIcon.png" alt="CallCaption icon" width="128" height="128" style="border-radius: 28px;">
 </p>
 
 <h1 align="center">CallCaption</h1>
 
 <p align="center">
-  <strong>Native, Ultra-Low Latency Live Call Captions & Real-Time Neural Translation for macOS</strong>
+  Floating live captions and real-time translation for macOS calls.
 </p>
 
 <p align="center">
-  <a href="#features"><img src="https://img.shields.io/badge/macOS-14.0%2B%20%7C%20Sonoma%20%2F%20Sequoia-black?style=for-the-badge&logo=apple" alt="macOS Version"></a>
-  <a href="#features"><img src="https://img.shields.io/badge/Swift-6.0%2B-F05138?style=for-the-badge&logo=swift&logoColor=white" alt="Swift Version"></a>
-  <a href="#features"><img src="https://img.shields.io/badge/Apple%20Silicon-M1%20%2F%20M2%20%2F%20M3%20%2F%20M4-007AFF?style=for-the-badge" alt="Apple Silicon"></a>
-  <a href="#features"><img src="https://img.shields.io/badge/Audio-Zero%20Virtual%20Cables-00C853?style=for-the-badge" alt="Audio Engine"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License"></a>
+  <a href="https://developer.apple.com/macos/"><img src="https://img.shields.io/badge/macOS-14.0%2B-black?style=flat-square&logo=apple" alt="macOS 14+"></a>
+  <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-6.0-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 6"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="MIT License"></a>
 </p>
 
----
 
-## 📖 Overview
 
-**CallCaption** is a state-of-the-art macOS application that provides floating, real-time live captions and bidirectional language translation for voice and video calls (FaceTime, Zoom, Phone, Google Meet, VoIP, WhatsApp, and more).
 
-Powered natively by Apple's on-device neural engines (`ScreenCaptureKit`, `AVAudioEngine`, and `SFSpeechRecognizer`), CallCaption requires **zero virtual audio cables** (no BlackHole or Soundflower required) and preserves your natural voice while projecting translated captions to both you and your caller.
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        MacBook / Mac Host (You)                        │
-│                                                                        │
-│   • Captures caller speech directly via ScreenCaptureKit               │
-│   • Captures your voice directly via Built-in Mic / AirPods            │
-│   • Translates bidirectionally via on-device Apple Speech Engine       │
-│   • Displays floating HUD: Ambient Whisper Pill or Dynamic Island Pro  │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ Local Web Server & Secure Tunnel
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                    Remote Caller (iOS / Android / Web)                 │
-│                                                                        │
-│   • Scans QR code or opens phone link (no app download required!)      │
-│   • Streams live translated captions in real time                      │
-│   • Supports native Mobile Picture-in-Picture (PiP) over call apps     │
-└────────────────────────────────────────────────────────────────────────┘
-```
+## Features
+
+- **No virtual audio cables required**: Captures system audio output directly using Apple's `ScreenCaptureKit` framework and your mic through `AVAudioEngine`. Works out of the box with built-in speakers, external mics, and AirPods.
+- **On-device speech recognition & translation**: Uses Apple's native speech recognition models (`SFSpeechRecognizer`) and on-device translation. Audio never leaves your machine.
+- **Floating HUD**: Stays on top of your call window with two display modes:
+  - **Compact Pill**: An unobtrusive 50px status pill showing live caller translations, language selector, mini audio visualizer, and quick controls.
+  - **Expanded HUD**: A dual-card split view showing simultaneous transcripts and translations for both speakers.
+- **Phone companion (Web / Picture-in-Picture)**: The person you are calling doesn't need to install anything. They can scan a QR code from the app to open a web stream on their phone (iOS Safari or Android Chrome) with Picture-in-Picture support floating over their call.
+- **20+ languages supported**: English, Spanish, French, German, Italian, Portuguese, Japanese, Chinese, Korean, Arabic, Russian, and more.
+- **Call transcript history**: Keep searchable call logs with speaker labels and timestamps. Export to `.txt` or copy directly to your clipboard.
 
 ---
 
-## ✨ Key Features
-
-- **⚡ Zero Virtual Audio Cables**: Direct hardware loopback audio capture via macOS `ScreenCaptureKit` and `AVAudioEngine`. Works out-of-the-box with any headset, AirPods, or speakers.
-- **🏝️ Dynamic Island Pro (Full Mode)**: Dual-stream split stage HUD featuring emerald green caller cards, cyan user cards, live audio waveform visualizer, 20+ language route selectors, and quick-access docks.
-- **💬 Ambient Whisper (Compact Mode)**: Ultra-minimalist 50px pill banner displaying real-time caller translations, interactive translation route capsule (`🇪🇸 ES → EN 🇬🇧`), 4-bar equalizer, and single-click expand button.
-- **📱 Phone Companion Web Captioner**: Remote callers scan a QR code to view live subtitles directly on their iPhone Safari or Android Chrome with zero app installation. Supports mobile Picture-in-Picture floating over call apps.
-- **🗣️ 20+ Language Support**: Bidirectional speech recognition and translation across English, Spanish, French, German, Italian, Portuguese, Japanese, Chinese, Korean, Arabic, Russian, and more.
-- **⚙️ Integrated System Permissions & Audio Diagnostic Window**: Comprehensive setup dashboard showing live authorization status (`Microphone`, `Speech Engine`, `Screen Recording`), a real-time mic signal test, and quick links to macOS System Settings.
-- **📄 Live Call Transcript Logging**: Real-time transcript tracking with timestamps, speaker separation, clipboard copy, and `.txt` file export.
-- **🔒 Privacy First**: On-device processing. No audio is ever stored on external cloud servers.
-
----
-
-## 🎛️ User Interface Modes
-
-### 1. Ambient Whisper (Compact HUD)
-Default compact floating pill designed to sit unobtrusively at the top or bottom of your call window.
-
-```
-┌────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  🟢   [ 🇪🇸  ES → EN  🇬🇧 ]   Hello, how are you doing today?                 [QR]  ılılı  ⏸  ⤢  📌  │
-└────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
-- **Left Flag (`🇪🇸`)**: Click to select Caller language.
-- **Right Flag (`🇬🇧`)**: Click to select Your language.
-- **Center Route (`ES → EN`)**: Click to swap languages (`⇄`) or configure speech locales.
-- **Right Controls Dock**: QR Share (`⌘S`), Live Equalizer, Pause (`Space`), Expand (`⌘M`), Pin Always-on-Top.
-
-### 2. Dynamic Island Pro (Full HUD)
-Expanded command center for multi-language management and detailed dual-speaker tracking.
-
-- **Caller Subtitle Card (Emerald Glow)**: Live translated transcript of the incoming speaker.
-- **You Subtitle Card (Electric Cyan Glow)**: Live confirmation transcript of your spoken audio.
-- **Control Bar**: Audio test button, language switchers, transcript viewer, and system controls.
-
----
-
-## ⌨️ Keyboard Shortcuts
+## Keyboard Shortcuts
 
 | Shortcut | Action |
-|:---:|:---|
-| <kbd>⌘</kbd> <kbd>M</kbd> | Toggle between Compact Pill and Full Dynamic Island HUD |
-| <kbd>Space</kbd> | Pause / Resume Live Captions |
-| <kbd>⌘</kbd> <kbd>S</kbd> | Open Share & QR Code window for mobile caller |
-| <kbd>⌘</kbd> <kbd>T</kbd> | Open Live Call Transcript Log |
-| <kbd>⌘</kbd> <kbd>,</kbd> | Open System Permissions & Audio Setup dashboard |
-| <kbd>⌘</kbd> <kbd>H</kbd> | Bring Captions HUD to front |
+| :--- | :--- |
+| <kbd>⌘</kbd> <kbd>M</kbd> | Toggle between Compact Pill and Expanded HUD |
+| <kbd>Space</kbd> | Pause / Resume live transcription |
+| <kbd>⌘</kbd> <kbd>S</kbd> | Open QR code / Share link for remote mobile caller |
+| <kbd>⌘</kbd> <kbd>T</kbd> | Open Call Transcript viewer |
+| <kbd>⌘</kbd> <kbd>,</kbd> | Open Permissions & Audio Setup |
+| <kbd>⌘</kbd> <kbd>H</kbd> | Bring HUD to front |
 | <kbd>⌘</kbd> <kbd>Q</kbd> | Quit CallCaption |
 
 ---
 
-## 🛠️ Build & Installation
+## How It Works
 
-### Requirements
-- macOS 14.0 (Sonoma) or macOS 15.0+ (Sequoia)
-- Apple Silicon (M1 / M2 / M3 / M4) or Intel Mac
+
+1. **Caller Audio Capture**: `AudioCaptureEngine` uses `ScreenCaptureKit` to tap system audio output without muting your speakers or requiring virtual audio devices.
+2. **Microphone Capture**: A parallel `AVAudioEngine` tap captures your local microphone.
+3. **Speech-to-Text**: Audio buffers are fed into two independent `SFSpeechAudioBufferRecognitionRequest` pipelines.
+4. **Translation**: Completed segments are passed to macOS's neural translation session and rendered immediately onto the HUD.
+5. **Mobile Companion**: A lightweight embedded HTTP server (`WebCaptionServer`) broadcasts live subtitles via Server-Sent Events (SSE). An automated SSH tunnel (`localhost.run`) provides an HTTPS link and QR code for remote callers.
+
+---
+
+## Requirements
+
+- **macOS 14.0 (Sonoma)** or **macOS 15.0+ (Sequoia)**
+- Apple Silicon (M1/M2/M3/M4) recommended; Intel Macs supported
 - Xcode Command Line Tools (`xcode-select --install`)
 
-### Quick Build
-Clone the repository and run the build script:
+---
+
+## Building from Source
+
+No third-party package managers or external dependencies needed. Everything builds with native Apple frameworks.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/CallCaption.git
+# Clone the repository
+git clone https://github.com/samy/CallCaption.git
 cd CallCaption
 
-# Build application bundle
+# Compile the application bundle
 ./build.sh
 
-# Run application
+# Run CallCaption
 ./run.sh
 ```
 
-### Packaging Release DMG
-To package a standalone, redistributable installer DMG:
+### Creating a Release DMG
+
+To produce a redistributable, compressed disk image (`CallCaption-Installer.dmg`):
 
 ```bash
 ./package.sh
-# Output: CallCaption-Installer.dmg
 ```
 
 ---
 
-## 📁 Repository Structure
+## Permissions Setup
 
-```
+Because CallCaption captures both system audio output and your microphone, macOS requires three privacy permissions:
+
+1. **Microphone**: Needed to transcribe your voice.
+2. **Speech Recognition**: Needed for Apple's on-device speech-to-text models.
+3. **Screen & System Audio Recording**: Required by macOS `ScreenCaptureKit` to tap system audio output from calling apps. *Note: CallCaption only reads the audio stream; it never captures screen pixels or window contents.*
+
+If any permission is missing, open the setup window with <kbd>⌘</kbd> <kbd>,</kbd> or from the menu bar icon to check statuses and jump directly to the relevant System Settings pane.
+
+---
+
+## Project Structure
+
+```text
 CallCaption/
 ├── Sources/
-│   ├── AppDelegate.swift              # App lifecycle & status bar menu item
-│   ├── AudioCaptureEngine.swift       # ScreenCaptureKit & AVAudioEngine audio tap
-│   ├── AudioVisualizerView.swift      # Real-time FFT audio visualizer & equalizer
-│   ├── HUDCaptionWindow.swift         # Dynamic Island & Ambient Whisper floating HUD
-│   ├── LanguageModels.swift           # Supported languages and locale definitions
-│   ├── MobileClientHTML.swift         # Web client for phone companion (SSE + PiP)
-│   ├── PermissionHelper.swift         # macOS TCC permission handlers
-│   ├── PermissionsWindow.swift        # Interactive Permissions & Diagnostics window
-│   ├── ShareWindow.swift              # QR code generator & phone link sharing window
-│   ├── SpeechRecognitionManager.swift # Apple SFSpeechRecognizer transcription engine
-│   ├── TranscriptManager.swift        # Call transcript accumulator & export logic
-│   ├── TranscriptWindow.swift         # Live transcript viewer & text exporter
+│   ├── AppDelegate.swift              # App lifecycle, menu bar icon, and hotkeys
+│   ├── AudioCaptureEngine.swift       # ScreenCaptureKit & AVAudioEngine audio pipelines
+│   ├── AudioVisualizerView.swift      # Real-time audio waveform and equalizer view
+│   ├── HUDCaptionWindow.swift         # Floating compact & expanded caption HUD
+│   ├── LanguageModels.swift           # Supported language definitions and locale codes
+│   ├── MobileClientHTML.swift         # Embedded HTML/CSS/JS client for phone browsers
+│   ├── PermissionHelper.swift         # macOS TCC authorization helpers
+│   ├── PermissionsWindow.swift        # Audio level meter and permissions dashboard
+│   ├── ShareWindow.swift              # QR code generator and share link window
+│   ├── SpeechRecognitionManager.swift # Apple SFSpeechRecognizer transcription logic
+│   ├── TranscriptManager.swift        # In-memory transcript history and file exporter
+│   ├── TranscriptWindow.swift         # Transcript history viewer window
 │   ├── TranslationEngine.swift        # On-device neural translation engine
-│   ├── TunnelManager.swift            # Secure localhost tunnel for remote mobile access
-│   ├── WebCaptionServer.swift         # Local HTTP/SSE server streaming subtitles
-│   └── main.swift                     # Entry point
+│   ├── TunnelManager.swift            # Secure tunnel management for mobile sharing
+│   ├── WebCaptionServer.swift         # Embedded HTTP/SSE server for remote viewers
+│   └── main.swift                     # NSApplication entry point
 ├── Resources/
-│   ├── AppIcon.icns                   # Official macOS application icon bundle
-│   ├── AppIcon.png                    # Lossless high-resolution master icon
-│   ├── CallCaption.entitlements       # Security and sandbox entitlements
-│   └── Info.plist                     # Application bundle metadata
-├── build.sh                           # Clean compilation and ad-hoc code-signing
-├── package.sh                         # Release DMG creation script
-├── run.sh                             # Quick launch helper
-├── .gitignore                         # Git exclusion rules
-├── LICENSE                            # MIT License
-└── README.md                          # Documentation
+│   ├── AppIcon.icns                   # macOS application icon
+│   ├── AppIcon.png                    # High-resolution master icon
+│   ├── CallCaption.entitlements       # Sandboxing and audio capture entitlements
+│   └── Info.plist                     # App metadata and privacy usage descriptions
+├── build.sh                           # Build script with ad-hoc code signing
+├── package.sh                         # DMG packaging script
+├── run.sh                             # Development launch script
+├── .gitignore
+├── LICENSE
+└── README.md
 ```
 
 ---
 
-## 🔒 Permissions & Security
+## License
 
-CallCaption requires the following macOS permissions to function:
-1. **Microphone**: Needed to transcribe your spoken voice.
-2. **Speech Recognition**: Uses Apple's local speech recognition engine.
-3. **Screen & Audio Recording**: Needed by `ScreenCaptureKit` to capture incoming call audio directly from your speakers.
-
-All permission requests can be monitored, tested, and resolved through the built-in **System Permissions & Audio Setup** window (<kbd>⌘</kbd> <kbd>,</kbd>).
-
----
-
-## 📄 License
-
-This project is licensed under the [MIT License](LICENSE).
+Released under the [MIT License](LICENSE).

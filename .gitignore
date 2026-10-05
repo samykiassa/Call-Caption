@@ -10,9 +10,11 @@ CallCaption.app/
 CallCaption-Installer.dmg
 *.dmg
 *.app
+*.dSYM/
 .build/
 .cache/
 /tmp/clang-cache/
+DerivedData/
 
 # Development & Scratch
 *.log
@@ -20,9 +22,10 @@ CallCaption-Installer.dmg
 *.swp
 *~
 
-# IDEs
+# IDEs & Tooling
 .idea/
 .vscode/
+.swiftpm/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 
