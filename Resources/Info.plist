@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>CallCaption</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.samy.CallCaption</string>
+    <key>CFBundleName</key>
+    <string>CallCaption</string>
+    <key>CFBundleDisplayName</key>
+    <string>Live Call Caption</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>CallCaption requires microphone access to transcribe and translate call audio in real time.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>CallCaption uses Apple Speech Recognition to provide live floating captions during your voice and video calls.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>CallCaption connects with iOS and Android devices on your local Wi-Fi to display real-time call captions.</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+</dict>
+</plist>

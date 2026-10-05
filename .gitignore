@@ -1,0 +1,33 @@
+# macOS System
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Build Artifacts & Packages
+CallCaption.app/
+CallCaption-Installer.dmg
+*.dmg
+*.app
+.build/
+.cache/
+/tmp/clang-cache/
+
+# Development & Scratch
+*.log
+*.tmp
+*.swp
+*~
+
+# IDEs
+.idea/
+.vscode/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Private Tunnel Keys (Auto-generated on demand in ~/Library/Application Support)
+Resources/tunnel_key
+Resources/tunnel_key*
+*.key
+*.pem
