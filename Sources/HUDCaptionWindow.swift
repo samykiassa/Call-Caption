@@ -528,11 +528,11 @@ public class CompactLanguageRouteView: NSView {
 // MARK: - Main HUD Window
 public class HUDCaptionWindow: NSPanel, NSWindowDelegate {
     public init() {
-        let screenSize = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
+        let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let windowWidth: CGFloat = 780
         let windowHeight: CGFloat = 50
-        let initialX = (screenSize.width - windowWidth) / 2.0
-        let initialY: CGFloat = 70
+        let initialX = visibleFrame.origin.x + (visibleFrame.width - windowWidth) / 2.0
+        let initialY = visibleFrame.origin.y + (visibleFrame.height - windowHeight) / 2.0
         
         super.init(
             contentRect: NSRect(x: initialX, y: initialY, width: windowWidth, height: windowHeight),
