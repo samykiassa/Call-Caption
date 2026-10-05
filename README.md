@@ -70,7 +70,7 @@ No third-party package managers or external dependencies needed. Everything buil
 
 ```bash
 # Clone the repository
-git clone https://github.com/samy/CallCaption.git
+git clone https://github.com/samykiassa/Call-Caption.git
 cd CallCaption
 
 # Compile the application bundle
