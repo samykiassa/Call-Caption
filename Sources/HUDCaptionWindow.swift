@@ -574,7 +574,7 @@ public class HUDCaptionWindow: NSPanel, NSWindowDelegate {
         self.isOpaque = false
         self.backgroundColor = .clear
         self.isMovableByWindowBackground = true
-        self.hasShadow = true
+        self.hasShadow = false
         self.delegate = self
     }
     
