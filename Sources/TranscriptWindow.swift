@@ -11,7 +11,7 @@ public class TranscriptWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Live Call Transcript Log"
+        window.title = "Transcript History"
         window.level = .floating
         window.minSize = NSSize(width: 500, height: 320)
         window.isReleasedWhenClosed = false
@@ -21,9 +21,11 @@ public class TranscriptWindowController: NSWindowController {
         setupUI()
         updateContent()
         
-        TranscriptManager.shared.onEntriesUpdated = { [weak self] _ in
-            self?.updateContent()
-        }
+        NotificationCenter.default.addObserver(self, selector: #selector(entriesUpdated), name: TranscriptManager.EntriesUpdatedNotification, object: nil)
+    }
+    
+    @objc private func entriesUpdated() {
+        updateContent()
     }
     
     public required init?(coder: NSCoder) {
@@ -67,23 +69,23 @@ public class TranscriptWindowController: NSWindowController {
         let bottomBar = NSView(frame: NSRect(x: 16, y: 12, width: contentView.bounds.width - 32, height: 36))
         bottomBar.autoresizingMask = [.width, .minYMargin]
         
-        let copyBtn = NSButton(title: "📋 Copy All", target: self, action: #selector(copyAction))
-        copyBtn.frame = NSRect(x: 0, y: 2, width: 110, height: 32)
+        let copyBtn = NSButton(title: "Copy All", target: self, action: #selector(copyAction))
+        copyBtn.frame = NSRect(x: 0, y: 2, width: 96, height: 32)
         copyBtn.bezelStyle = .rounded
         bottomBar.addSubview(copyBtn)
         
-        let exportBtn = NSButton(title: "💾 Save .txt...", target: self, action: #selector(exportAction))
-        exportBtn.frame = NSRect(x: 120, y: 2, width: 120, height: 32)
+        let exportBtn = NSButton(title: "Export...", target: self, action: #selector(exportAction))
+        exportBtn.frame = NSRect(x: 106, y: 2, width: 96, height: 32)
         exportBtn.bezelStyle = .rounded
         bottomBar.addSubview(exportBtn)
         
-        let clearBtn = NSButton(title: "🗑️ Clear Log", target: self, action: #selector(clearAction))
-        clearBtn.frame = NSRect(x: 250, y: 2, width: 110, height: 32)
+        let clearBtn = NSButton(title: "Clear", target: self, action: #selector(clearAction))
+        clearBtn.frame = NSRect(x: 212, y: 2, width: 84, height: 32)
         clearBtn.bezelStyle = .rounded
         bottomBar.addSubview(clearBtn)
         
         countLabel = NSTextField(labelWithString: "0 entries")
-        countLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        countLabel.font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
         countLabel.textColor = .secondaryLabelColor
         countLabel.alignment = .right
         countLabel.frame = NSRect(x: bottomBar.bounds.width - 150, y: 8, width: 150, height: 20)

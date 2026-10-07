@@ -6,6 +6,7 @@ public actor TranslationEngine {
     
     // In-memory cache: "sourceCode_targetCode_text" -> translatedText
     private var cache: [String: String] = [:]
+    private var cacheKeys: [String] = []
     
     // Cached native TranslationSession per language pair
     private var activeSessions: [String: Any] = [:]
@@ -48,8 +49,16 @@ public actor TranslationEngine {
         let finalTranslation = result ?? trimmed
         
         // Cache the successful translation
-        if cache.count > 500 {
-            cache.removeAll()
+        if cache[cacheKey] == nil {
+            if cacheKeys.count >= 500 {
+                let numToRemove = 100
+                let keysToRemove = cacheKeys.prefix(numToRemove)
+                for key in keysToRemove {
+                    cache.removeValue(forKey: key)
+                }
+                cacheKeys.removeFirst(numToRemove)
+            }
+            cacheKeys.append(cacheKey)
         }
         cache[cacheKey] = finalTranslation
         
@@ -129,5 +138,6 @@ public actor TranslationEngine {
     
     public func clearCache() {
         cache.removeAll()
+        cacheKeys.removeAll()
     }
 }

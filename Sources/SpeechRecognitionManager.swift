@@ -2,27 +2,70 @@ import Foundation
 import Speech
 import AVFoundation
 import CoreMedia
+import os
 
+/// A protocol that defines the bidirectional communication of speech recognition and translation updates.
+///
+/// Conforming objects can receive real-time streaming updates for both partial (in-progress) and
+/// final transcriptions, as well as status changes and authorization errors.
 public protocol BidirectionalSpeechDelegate: AnyObject {
-    // Caller's speech (Spanish -> English for Mac user)
+    /// Called when an ongoing speech utterance from the remote caller is updated.
+    /// - Parameters:
+    ///   - partialOriginal: The current partial transcription of the caller's speech.
+    ///   - partialTranslated: The current partial translation of the caller's speech.
     func callerSpeechDidUpdate(partialOriginal: String, partialTranslated: String)
+    
+    /// Called when the remote caller has finished a speech utterance.
+    /// - Parameters:
+    ///   - original: The final transcription of the caller's speech.
+    ///   - translated: The final translation of the caller's speech.
     func callerSpeechDidFinalize(original: String, translated: String)
     
-    // Your speech (English -> Spanish for Mobile caller)
+    /// Called when an ongoing speech utterance from the local user is updated.
+    /// - Parameters:
+    ///   - partialOriginal: The current partial transcription of the local user's speech.
+    ///   - partialTranslated: The current partial translation of the local user's speech.
     func mySpeechDidUpdate(partialOriginal: String, partialTranslated: String)
+    
+    /// Called when the local user has finished a speech utterance.
+    /// - Parameters:
+    ///   - original: The final transcription of the local user's speech.
+    ///   - translated: The final translation of the local user's speech.
     func mySpeechDidFinalize(original: String, translated: String)
     
+    /// Called when the active recognition state changes.
+    /// - Parameter isRecognizing: A boolean indicating whether speech recognition is actively processing.
     func speechRecognitionStatusChanged(_ isRecognizing: Bool)
+    
+    /// Called when an authorization or permissions error prevents speech recognition.
+    /// - Parameter message: A user-facing message detailing the error.
     func speechRecognitionDidEncounterAuthError(message: String)
 }
 
+/// A class that manages a single, unidirectional channel of speech recognition and translation.
+///
+/// `SingleSpeechChannel` handles the underlying `SFSpeechRecognizer` session, manages audio buffer
+/// ingestion, and translates finalized or partial text using the `TranslationEngine`. It also features
+/// automatic session cycling and error backoff to ensure reliable, long-running transcription.
 public class SingleSpeechChannel: NSObject, @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock()
+    
+    /// The unique name identifying this channel (e.g., "caller" or "me").
     public let channelName: String
+    
+    /// The BCP-47 language tag identifying the source spoken language.
     public private(set) var sourceLocaleId: String
+    
+    /// The ISO language code representing the target translation language.
     public private(set) var targetLangCode: String
     
+    /// A closure called repeatedly as partial speech transcription and translation progress.
     public var onPartial: ((String, String) -> Void)?
+    
+    /// A closure called when a speech utterance has completed and final transcription/translation are available.
     public var onFinal: ((String, String) -> Void)?
+    
+    /// A closure called when an authorization or initialization error occurs.
     public var onAuthError: ((String) -> Void)?
     
     private var recognizer: SFSpeechRecognizer?
@@ -34,12 +77,20 @@ public class SingleSpeechChannel: NSObject, @unchecked Sendable {
     
     private var currentOriginal: String = ""
     private var currentTranslated: String = ""
+    
+    /// Indicates whether the channel is currently capturing and recognizing speech.
     public private(set) var isRunning: Bool = false
+    
     private var sessionStartTime: Date = Date()
     private var restartWorkItem: DispatchWorkItem?
     private var consecutiveErrors: Int = 0
     private var isStartingSession: Bool = false
     
+    /// Initializes a new speech channel with the specified configurations.
+    /// - Parameters:
+    ///   - name: A descriptive identifier for this channel.
+    ///   - sourceLocaleId: The locale of the incoming speech.
+    ///   - targetLangCode: The desired target language code for translation.
     public init(name: String, sourceLocaleId: String, targetLangCode: String) {
         self.channelName = name
         self.sourceLocaleId = sourceLocaleId
@@ -48,6 +99,10 @@ public class SingleSpeechChannel: NSObject, @unchecked Sendable {
         super.init()
     }
     
+    /// Starts the speech recognition channel with new language settings.
+    /// - Parameters:
+    ///   - sourceLocaleId: The expected locale of the incoming speech audio.
+    ///   - targetLangCode: The language code to which recognized text should be translated.
     public func start(sourceLocaleId: String, targetLangCode: String) {
         stop()
         self.sourceLocaleId = sourceLocaleId
@@ -59,6 +114,7 @@ public class SingleSpeechChannel: NSObject, @unchecked Sendable {
         startNewSession()
     }
     
+    /// Stops the speech recognition channel, halting all audio processing and pending translation tasks.
     public func stop() {
         isRunning = false
         restartWorkItem?.cancel()
@@ -74,6 +130,10 @@ public class SingleSpeechChannel: NSObject, @unchecked Sendable {
         oldTask?.cancel()
     }
     
+    /// Updates the source and target languages, restarting the session if it is currently running.
+    /// - Parameters:
+    ///   - sourceLocaleId: The new expected locale of the incoming speech audio.
+    ///   - targetLangCode: The new language code to which recognized text should be translated.
     public func updateLanguages(sourceLocaleId: String, targetLangCode: String) {
         self.sourceLocaleId = sourceLocaleId
         self.targetLangCode = targetLangCode
@@ -82,6 +142,8 @@ public class SingleSpeechChannel: NSObject, @unchecked Sendable {
         }
     }
     
+    /// Appends a video/audio sample buffer to the recognition request.
+    /// - Parameter buffer: The sample buffer containing audio data.
     public func appendAudioSampleBuffer(_ buffer: CMSampleBuffer) {
         guard isRunning else { return }
         if let pcm = AudioCaptureEngine.convertSampleBufferToPCM(sampleBuffer: buffer) {
@@ -99,6 +161,8 @@ public class SingleSpeechChannel: NSObject, @unchecked Sendable {
         }
     }
     
+    /// Appends a PCM audio buffer directly to the recognition request.
+    /// - Parameter buffer: The PCM buffer containing audio data.
     public func appendPCMBuffer(_ buffer: AVAudioPCMBuffer) {
         guard isRunning else { return }
         guard let req = request else {
@@ -120,6 +184,11 @@ public class SingleSpeechChannel: NSObject, @unchecked Sendable {
         }
     }
     
+    /// Explicitly initializes and begins a new underlying `SFSpeechRecognitionTask`.
+    ///
+    /// This method handles tearing down the old request, setting up a new audio buffer recognition
+    /// request, and appropriately routing the text results and error codes to handle API limits,
+    /// silences, and standard stream cycling.
     public func startNewSession() {
         guard isRunning else { return }
         if isStartingSession { return }
@@ -263,6 +332,12 @@ public class SingleSpeechChannel: NSObject, @unchecked Sendable {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
     
+    /// Processes and translates raw text as if it were recognized speech input.
+    ///
+    /// Useful for injecting direct text strings (e.g., from an external web client).
+    /// - Parameters:
+    ///   - text: The transcribed text string.
+    ///   - isFinal: A boolean indicating if this is the final completed utterance.
     public func handleDirectText(_ text: String, isFinal: Bool) {
         handleText(text, isFinal: isFinal)
     }
@@ -322,22 +397,35 @@ public class SingleSpeechChannel: NSObject, @unchecked Sendable {
     }
 }
 
+/// An overarching coordinator for bidirectional speech recognition.
+///
+/// `SpeechRecognitionManager` manages two distinct `SingleSpeechChannel` instances:
+/// one for the remote caller, and one for the local user. It consolidates audio feeds,
+/// language configurations, and lifecycle events, forwarding recognized and translated
+/// text events to its delegate.
 public class SpeechRecognitionManager: NSObject, @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock()
+    
+    /// The delegate to receive all speech transcription and translation events.
     public weak var delegate: BidirectionalSpeechDelegate?
     
-    // Channel 1: Caller (Spanish -> English)
+    /// The speech recognition channel dedicated to processing the remote caller's audio.
     public let callerChannel = SingleSpeechChannel(name: "caller", sourceLocaleId: "es-ES", targetLangCode: "en")
     
-    // Channel 2: You (English -> Spanish)
+    /// The speech recognition channel dedicated to processing the local user's audio.
     public let myChannel = SingleSpeechChannel(name: "me", sourceLocaleId: "en-US", targetLangCode: "es")
     
+    /// A boolean indicating whether the bidirectional manager is actively running.
     public private(set) var isRunning: Bool = false
     
+    /// Initializes a new bidirectional speech recognition manager.
     public override init() {
         super.init()
         setupCallbacks()
     }
     
+    /// Asks the user for permission to perform speech recognition.
+    /// - Parameter completion: A closure called on the main thread with the resulting authorization status.
     public static func requestAuthorization(completion: @escaping (Bool) -> Void) {
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async {
@@ -370,6 +458,10 @@ public class SpeechRecognitionManager: NSObject, @unchecked Sendable {
         }
     }
     
+    /// Starts both caller and user recognition channels with the specified locales.
+    /// - Parameters:
+    ///   - callerLocaleId: The locale identifier for the caller's speech.
+    ///   - myLocaleId: The locale identifier for the local user's speech.
     public func start(
         callerLocaleId: String,
         myLocaleId: String
@@ -386,6 +478,7 @@ public class SpeechRecognitionManager: NSObject, @unchecked Sendable {
         delegate?.speechRecognitionStatusChanged(true)
     }
     
+    /// Stops both recognition channels.
     public func stop() {
         isRunning = false
         callerChannel.stop()
@@ -393,6 +486,10 @@ public class SpeechRecognitionManager: NSObject, @unchecked Sendable {
         delegate?.speechRecognitionStatusChanged(false)
     }
     
+    /// Updates the expected languages for both channels dynamically.
+    /// - Parameters:
+    ///   - callerLocaleId: The new locale identifier for the caller's speech.
+    ///   - myLocaleId: The new locale identifier for the local user's speech.
     public func updateLanguages(callerLocaleId: String, myLocaleId: String) {
         let callerCode = callerLocaleId.components(separatedBy: "-").first ?? "es"
         let myCode = myLocaleId.components(separatedBy: "-").first ?? "en"
@@ -401,19 +498,28 @@ public class SpeechRecognitionManager: NSObject, @unchecked Sendable {
         myChannel.updateLanguages(sourceLocaleId: myLocaleId, targetLangCode: callerCode)
     }
     
+    /// Feeds standard CMSampleBuffer audio from the remote caller into the caller channel.
+    /// - Parameter buffer: The audio sample buffer to process.
     public func feedCallerAudioBuffer(_ buffer: CMSampleBuffer) {
         callerChannel.appendAudioSampleBuffer(buffer)
     }
     
+    /// Feeds PCM audio from the remote caller into the caller channel.
+    /// - Parameter buffer: The PCM audio buffer to process.
     public func feedCallerAudioBuffer(_ buffer: AVAudioPCMBuffer) {
         callerChannel.appendPCMBuffer(buffer)
     }
     
+    /// Feeds PCM audio from the local user's microphone into the local user channel.
+    /// - Parameter buffer: The PCM audio buffer to process.
     public func feedMyAudioBuffer(_ buffer: AVAudioPCMBuffer) {
         myChannel.appendPCMBuffer(buffer)
     }
     
-    // Direct speech input (e.g. from mobile phone web client)
+    /// Injects plain text directly into the caller channel as an alternative to audio recognition.
+    /// - Parameters:
+    ///   - text: The text to process and translate.
+    ///   - isFinal: Indicates whether the text is a completed utterance.
     public func injectCallerSpeech(text: String, isFinal: Bool) {
         callerChannel.handleDirectText(text, isFinal: isFinal)
     }

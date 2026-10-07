@@ -14,7 +14,7 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Share Live Subtitles (iOS & Android)"
+        window.title = "Share Live Captions"
         window.level = .floating
         window.isReleasedWhenClosed = false
         super.init(window: window)
@@ -40,16 +40,18 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
         let contentView = NSView(frame: window.contentView!.bounds)
         contentView.wantsLayer = true
         
-        let titleLabel = NSTextField(labelWithString: "📱 Live Subtitles for Caller (iOS & Android)")
-        titleLabel.font = NSFont.systemFont(ofSize: 16, weight: .bold)
+        let titleLabel = NSTextField(labelWithString: "Live Captions on Mobile")
+        titleLabel.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
         titleLabel.frame = NSRect(x: 24, y: contentView.bounds.height - 38, width: 452, height: 24)
         contentView.addSubview(titleLabel)
         
-        let subtitleLabel = NSTextField(labelWithString: "The caller can view live translated subtitles on their iPhone or Android browser without installing any app!")
-        subtitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+        let subtitleLabel = NSTextField(labelWithString: "Participants can follow live translated captions directly in any web browser without installing an app.")
+        subtitleLabel.font = NSFont.systemFont(ofSize: 12, weight: .regular)
         subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.frame = NSRect(x: 24, y: contentView.bounds.height - 68, width: 452, height: 28)
+        subtitleLabel.cell?.wraps = true
+        subtitleLabel.cell?.lineBreakMode = .byWordWrapping
         subtitleLabel.maximumNumberOfLines = 2
+        subtitleLabel.frame = NSRect(x: 24, y: contentView.bounds.height - 76, width: 452, height: 32)
         contentView.addSubview(subtitleLabel)
         
         // QR Code Display
@@ -60,16 +62,16 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
         // ------------------------------------------------------------------
         // Link 1: Public HTTPS Link (Recommended - works anywhere on 4G/5G)
         // ------------------------------------------------------------------
-        let pubHeader = NSTextField(labelWithString: "🌐 Public Link (Recommended • Works on 4G/5G/Any Wi-Fi):")
-        pubHeader.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        let pubHeader = NSTextField(labelWithString: "Public Web Link (Recommended)")
+        pubHeader.font = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
         pubHeader.textColor = NSColor.systemGreen
         pubHeader.frame = NSRect(x: 24, y: contentView.bounds.height - 254, width: 452, height: 18)
         contentView.addSubview(pubHeader)
         
-        publicUrlField = NSTextField(string: "Starting public HTTPS tunnel...")
+        publicUrlField = NSTextField(string: "Connecting to secure link...")
         publicUrlField.isEditable = false
         publicUrlField.alignment = .left
-        publicUrlField.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .bold)
+        publicUrlField.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
         publicUrlField.textColor = NSColor.systemTeal
         publicUrlField.frame = NSRect(x: 24, y: contentView.bounds.height - 282, width: 366, height: 24)
         publicUrlField.backgroundColor = NSColor.black.withAlphaComponent(0.2)
@@ -80,11 +82,11 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
         let copyPubBtn = NSButton(title: "Copy", target: self, action: #selector(copyPublicLinkAction))
         copyPubBtn.frame = NSRect(x: 396, y: contentView.bounds.height - 282, width: 80, height: 24)
         copyPubBtn.bezelStyle = .texturedRounded
-        copyPubBtn.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        copyPubBtn.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         contentView.addSubview(copyPubBtn)
         
-        tunnelStatusLabel = NSTextField(labelWithString: "Connecting to secure tunnel...")
-        tunnelStatusLabel.font = NSFont.systemFont(ofSize: 10, weight: .regular)
+        tunnelStatusLabel = NSTextField(labelWithString: "Establishing secure connection...")
+        tunnelStatusLabel.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
         tunnelStatusLabel.textColor = .secondaryLabelColor
         tunnelStatusLabel.frame = NSRect(x: 24, y: contentView.bounds.height - 302, width: 452, height: 16)
         contentView.addSubview(tunnelStatusLabel)
@@ -92,8 +94,8 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
         // ------------------------------------------------------------------
         // Link 2: Local Wi-Fi Link
         // ------------------------------------------------------------------
-        let localHeader = NSTextField(labelWithString: "🏠 Local Wi-Fi Link (If caller phone is on same Wi-Fi router):")
-        localHeader.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        let localHeader = NSTextField(labelWithString: "Local Network Link")
+        localHeader.font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
         localHeader.textColor = .secondaryLabelColor
         localHeader.frame = NSRect(x: 24, y: contentView.bounds.height - 326, width: 452, height: 16)
         contentView.addSubview(localHeader)
@@ -117,13 +119,13 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
         // ------------------------------------------------------------------
         // Action Buttons: Copy Invite & Test in Browser
         // ------------------------------------------------------------------
-        let copyInviteBtn = NSButton(title: "📋 Copy Subtitle Invitation", target: self, action: #selector(copyFullInviteAction))
+        let copyInviteBtn = NSButton(title: "Copy Invitation", target: self, action: #selector(copyFullInviteAction))
         copyInviteBtn.frame = NSRect(x: 24, y: contentView.bounds.height - 396, width: 280, height: 34)
         copyInviteBtn.bezelStyle = .rounded
-        copyInviteBtn.font = NSFont.systemFont(ofSize: 12, weight: .bold)
+        copyInviteBtn.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         contentView.addSubview(copyInviteBtn)
         
-        let testBtn = NSButton(title: "🌐 Test in Browser", target: self, action: #selector(openBrowserAction))
+        let testBtn = NSButton(title: "Open in Browser", target: self, action: #selector(openBrowserAction))
         testBtn.frame = NSRect(x: 312, y: contentView.bounds.height - 396, width: 164, height: 34)
         testBtn.bezelStyle = .rounded
         testBtn.font = NSFont.systemFont(ofSize: 12, weight: .medium)
@@ -132,10 +134,10 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
         // Instructions Box
         let box = NSBox(frame: NSRect(x: 24, y: 12, width: 452, height: 76))
         box.title = "Features"
-        box.titleFont = NSFont.systemFont(ofSize: 10, weight: .bold)
+        box.titleFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
         
-        let instructions = NSTextField(labelWithString: "• Works on Cellular 4G/5G and Wi-Fi worldwide via HTTPS.\n• Tap '📌 Float Subtitles' for a floating picture-in-picture window over video calls.\n• Streamed with real-time bidirectional translation and zero latency.")
-        instructions.font = NSFont.systemFont(ofSize: 10, weight: .regular)
+        let instructions = NSTextField(labelWithString: "• Secure end-to-end streaming over cellular and Wi-Fi networks.\n• Floating Picture-in-Picture mode keeps captions on screen during video calls.\n• Real-time bidirectional translation with low latency.")
+        instructions.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
         instructions.frame = NSRect(x: 10, y: 4, width: 432, height: 50)
         instructions.maximumNumberOfLines = 3
         box.contentView?.addSubview(instructions)
@@ -154,11 +156,11 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
         if let pub = TunnelManager.shared.publicURL, !pub.isEmpty {
             pubShare = pub
             publicUrlField?.stringValue = pubShare
-            tunnelStatusLabel?.stringValue = "✅ Public HTTPS Tunnel Active • Accessible on any network"
+            tunnelStatusLabel?.stringValue = "Secure link active · Accessible on any network"
             tunnelStatusLabel?.textColor = NSColor.systemGreen
         } else {
-            publicUrlField?.stringValue = "Connecting to tunnel... (Or use local Wi-Fi link)"
-            tunnelStatusLabel?.stringValue = "⏳ Tunnel connecting in background..."
+            publicUrlField?.stringValue = "Connecting to tunnel... (Or use local network link)"
+            tunnelStatusLabel?.stringValue = "Connecting to secure link..."
             tunnelStatusLabel?.textColor = NSColor.systemOrange
         }
         
@@ -175,7 +177,7 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
     }
     
     public func tunnelDidFail(error: String) {
-        tunnelStatusLabel?.stringValue = "⚠️ Tunnel not available. Use the Local Wi-Fi link."
+        tunnelStatusLabel?.stringValue = "Secure link unavailable · Using local network link"
         tunnelStatusLabel?.textColor = NSColor.systemOrange
     }
     
@@ -188,7 +190,7 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(link, forType: .string)
-        showAlert(title: "Link Copied!", message: "Public HTTPS subtitle link copied to clipboard. Send it to the caller!")
+        showAlert(title: "Link Copied", message: "Public link copied to clipboard.")
     }
     
     @objc private func copyLocalLinkAction() {
@@ -196,7 +198,7 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(link, forType: .string)
-        showAlert(title: "Local Link Copied!", message: "Local Wi-Fi subtitle link copied to clipboard. (Caller must be on the same Wi-Fi).")
+        showAlert(title: "Link Copied", message: "Local network link copied to clipboard. Ensure participants are connected to the same Wi-Fi network.")
     }
     
     @objc private func copyFullInviteAction() {
@@ -204,13 +206,13 @@ public class ShareWindowController: NSWindowController, TunnelManagerDelegate {
         let hostLang = WebCaptionServer.shared.hostLangName
         let callerLang = WebCaptionServer.shared.callerLangName
         
-        let msg = "📱 Live Translated Subtitles (\(callerLang) ⇄ \(hostLang))\n\nOpen this link on your phone (Safari or Chrome):\n\(activeURL)\n\nTap '📌 Float Subtitles' for a floating caption window during our call!"
+        let msg = "Live Captions (\(callerLang) ⇄ \(hostLang))\n\nOpen this link in your browser:\n\(activeURL)\n\nTap 'Float Subtitles' to keep captions visible during calls."
         
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(msg, forType: .string)
         
-        showAlert(title: "Invitation Copied!", message: "Subtitle invitation copied to clipboard. Paste it into your chat with the caller!")
+        showAlert(title: "Invitation Copied", message: "Live captions invitation link copied to clipboard.")
     }
     
     @objc private func openBrowserAction() {

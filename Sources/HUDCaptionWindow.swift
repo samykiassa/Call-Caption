@@ -20,12 +20,16 @@ public class HUDActionButton: NSView {
     public var isHighlightedState: Bool = false {
         didSet { updateHighlight() }
     }
+    public var isDestructive: Bool = false {
+        didSet { updateHighlight() }
+    }
     
-    public init(iconName: String, title: String, toolTip: String, action: @escaping () -> Void) {
+    public init(iconName: String, title: String, toolTip: String, isDestructive: Bool = false, action: @escaping () -> Void) {
         self.iconName = iconName
         self.title = title
+        self.isDestructive = isDestructive
         self.action = action
-        super.init(frame: NSRect(x: 0, y: 0, width: 44, height: 50))
+        super.init(frame: NSRect(x: 0, y: 0, width: 40, height: 50))
         self.toolTip = toolTip
         setupUI()
     }
@@ -35,7 +39,7 @@ public class HUDActionButton: NSView {
     private func setupUI() {
         wantsLayer = true
         
-        iconBox = NSView(frame: NSRect(x: 9, y: 20, width: 26, height: 26))
+        iconBox = NSView(frame: NSRect(x: 7, y: 20, width: 26, height: 26))
         iconBox.wantsLayer = true
         iconBox.layer?.cornerRadius = 6
         iconBox.layer?.borderWidth = 1.0
@@ -45,16 +49,18 @@ public class HUDActionButton: NSView {
         
         iconImageView = NSImageView(frame: NSRect(x: 3, y: 3, width: 20, height: 20))
         iconImageView.imageScaling = .scaleProportionallyDown
-        iconImageView.contentTintColor = NSColor(red: 0.88, green: 0.90, blue: 0.96, alpha: 1.0)
+        iconImageView.contentTintColor = isDestructive ? NSColor.systemRed : NSColor(red: 0.88, green: 0.90, blue: 0.96, alpha: 1.0)
         iconBox.addSubview(iconImageView)
         updateIcon()
         
         titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = NSFont.systemFont(ofSize: 9.5, weight: .medium)
-        titleLabel.textColor = NSColor(red: 0.65, green: 0.70, blue: 0.80, alpha: 1.0)
+        titleLabel.textColor = isDestructive ? NSColor.systemRed.withAlphaComponent(0.85) : NSColor(red: 0.65, green: 0.70, blue: 0.80, alpha: 1.0)
         titleLabel.alignment = .center
-        titleLabel.frame = NSRect(x: -6, y: 2, width: 56, height: 14)
+        titleLabel.frame = NSRect(x: -4, y: 2, width: 48, height: 14)
         addSubview(titleLabel)
+        
+        updateHighlight()
     }
     
     private func updateIcon() {
@@ -62,14 +68,24 @@ public class HUDActionButton: NSView {
             let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
             iconImageView.image = img.withSymbolConfiguration(config)
         }
+        if isDestructive {
+            iconImageView.contentTintColor = NSColor.systemRed
+        }
     }
     
     private func updateHighlight() {
-        if isHighlightedState {
-            iconBox.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.20).cgColor
-            titleLabel.textColor = .white
+        if isDestructive {
+            iconBox.layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.08).cgColor
+            iconBox.layer?.borderColor = NSColor.systemRed.withAlphaComponent(0.3).cgColor
+            titleLabel.textColor = NSColor.systemRed.withAlphaComponent(0.85)
+            iconImageView.contentTintColor = NSColor.systemRed
+        } else if isHighlightedState {
+            iconBox.layer?.backgroundColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 0.25).cgColor
+            iconBox.layer?.borderColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 0.8).cgColor
+            titleLabel.textColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 1.0)
         } else {
             iconBox.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.04).cgColor
+            iconBox.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
             titleLabel.textColor = NSColor(red: 0.65, green: 0.70, blue: 0.80, alpha: 1.0)
         }
     }
@@ -83,8 +99,15 @@ public class HUDActionButton: NSView {
     }
     
     public override func mouseEntered(with event: NSEvent) {
-        iconBox.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.18).cgColor
-        titleLabel.textColor = .white
+        if isDestructive {
+            iconBox.layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.25).cgColor
+            iconBox.layer?.borderColor = NSColor.systemRed.withAlphaComponent(0.8).cgColor
+            titleLabel.textColor = NSColor.systemRed
+        } else {
+            iconBox.layer?.backgroundColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 0.25).cgColor
+            iconBox.layer?.borderColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 0.8).cgColor
+            titleLabel.textColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 1.0)
+        }
     }
     
     public override func mouseExited(with event: NSEvent) {
@@ -141,7 +164,7 @@ public class HUDCompactButton: NSButton {
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
             self.animator().alphaValue = 1.0
-            self.contentTintColor = .white
+            self.contentTintColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 1.0)
         }
     }
     
@@ -192,8 +215,8 @@ public class LanguageSelectorBarView: NSView {
         wantsLayer = true
         layer?.cornerRadius = 14
         layer?.borderWidth = 1.0
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
-        layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.18, alpha: 0.95).cgColor
+        layer?.borderColor = NSColor(red: 0.98, green: 0.6, blue: 0.1, alpha: 0.4).cgColor
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.25).cgColor
         layer?.masksToBounds = true
         
         // --- YOU SECTION (Left: 6 to 130, width 124) ---
@@ -213,12 +236,12 @@ public class LanguageSelectorBarView: NSView {
         youFlagLabel.frame = NSRect(x: 8, y: 7, width: 26, height: 26)
         youContainer.addSubview(youFlagLabel)
         
-        youTitleLabel = NSTextField(labelWithString: "You:")
-        youTitleLabel.font = NSFont.systemFont(ofSize: 10, weight: .regular)
+        youTitleLabel = NSTextField(labelWithString: "YOU")
+        youTitleLabel.font = NSFont.systemFont(ofSize: 9.0, weight: .bold)
         youTitleLabel.textColor = NSColor(red: 0.65, green: 0.70, blue: 0.80, alpha: 1.0)
         youTitleLabel.isBordered = false
         youTitleLabel.drawsBackground = false
-        youTitleLabel.frame = NSRect(x: 36, y: 20, width: 82, height: 14)
+        youTitleLabel.frame = NSRect(x: 36, y: 21, width: 82, height: 13)
         youContainer.addSubview(youTitleLabel)
         
         youNameLabel = NSTextField(labelWithString: "English")
@@ -233,12 +256,16 @@ public class LanguageSelectorBarView: NSView {
         // --- SWAP BUTTON (Dead Center: 134 to 162, width 28) ---
         swapButton = NSButton(frame: NSRect(x: 134, y: 10, width: 28, height: 28))
         swapButton.isBordered = false
-        swapButton.title = "⇄"
-        swapButton.font = NSFont.systemFont(ofSize: 15, weight: .bold)
-        swapButton.contentTintColor = NSColor(red: 0.65, green: 0.70, blue: 0.80, alpha: 1.0)
+        swapButton.bezelStyle = .regularSquare
+        swapButton.imagePosition = .imageOnly
+        if let swapImg = NSImage(systemSymbolName: "arrow.left.arrow.right", accessibilityDescription: "Swap Languages") {
+            let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+            swapButton.image = swapImg.withSymbolConfiguration(config)
+        }
+        swapButton.contentTintColor = NSColor(red: 0.75, green: 0.80, blue: 0.90, alpha: 1.0)
         swapButton.target = self
         swapButton.action = #selector(swapClicked)
-        swapButton.toolTip = "Swap Languages (You ⇄ Caller)"
+        swapButton.toolTip = "Swap Languages"
         addSubview(swapButton)
         
         // --- CALLER SECTION (Right: 166 to 290, width 124) ---
@@ -258,12 +285,12 @@ public class LanguageSelectorBarView: NSView {
         callerFlagLabel.frame = NSRect(x: 8, y: 7, width: 26, height: 26)
         callerContainer.addSubview(callerFlagLabel)
         
-        callerTitleLabel = NSTextField(labelWithString: "Caller:")
-        callerTitleLabel.font = NSFont.systemFont(ofSize: 10, weight: .regular)
+        callerTitleLabel = NSTextField(labelWithString: "CALLER")
+        callerTitleLabel.font = NSFont.systemFont(ofSize: 9.0, weight: .bold)
         callerTitleLabel.textColor = NSColor(red: 0.65, green: 0.70, blue: 0.80, alpha: 1.0)
         callerTitleLabel.isBordered = false
         callerTitleLabel.drawsBackground = false
-        callerTitleLabel.frame = NSRect(x: 36, y: 20, width: 82, height: 14)
+        callerTitleLabel.frame = NSRect(x: 36, y: 21, width: 82, height: 13)
         callerContainer.addSubview(callerTitleLabel)
         
         callerNameLabel = NSTextField(labelWithString: "Spanish")
@@ -365,8 +392,8 @@ public class CompactLanguageRouteView: NSView {
         wantsLayer = true
         layer?.cornerRadius = 14
         layer?.borderWidth = 1.0
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
-        layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.18, alpha: 0.95).cgColor
+        layer?.borderColor = NSColor(red: 0.98, green: 0.6, blue: 0.1, alpha: 0.4).cgColor
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.25).cgColor
         layer?.masksToBounds = true
         self.toolTip = "Change languages or swap (Click to configure)"
         
@@ -430,13 +457,13 @@ public class CompactLanguageRouteView: NSView {
     }
     
     public override func mouseEntered(with event: NSEvent) {
-        layer?.backgroundColor = NSColor(red: 0.18, green: 0.22, blue: 0.30, alpha: 0.95).cgColor
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
+        layer?.backgroundColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 0.25).cgColor
+        layer?.borderColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 0.8).cgColor
     }
     
     public override func mouseExited(with event: NSEvent) {
-        layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.18, alpha: 0.95).cgColor
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.25).cgColor
+        layer?.borderColor = NSColor(red: 0.98, green: 0.6, blue: 0.1, alpha: 0.4).cgColor
     }
     
     public override func mouseUp(with event: NSEvent) {
@@ -647,6 +674,7 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
     private var compactPauseBtn: HUDCompactButton!
     private var compactExpandBtn: HUDCompactButton!
     private var compactPinBtn: HUDCompactButton!
+    private var compactCloseBtn: HUDCompactButton!
     
     // State Tracking
     public private(set) var isCompactMode: Bool = true
@@ -778,23 +806,80 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
         // ----------------------------------------------------
         topIslandBar = NSView(frame: NSRect(x: 0, y: 216, width: 880, height: 68))
         topIslandBar.wantsLayer = true
-        topIslandBar.layer?.cornerRadius = 18
-        topIslandBar.layer?.borderWidth = 1.0
-        topIslandBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        topIslandBar.layer?.backgroundColor = NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 0.94).cgColor
         topIslandBar.layer?.shadowColor = NSColor.black.cgColor
         topIslandBar.layer?.shadowRadius = 10
         topIslandBar.layer?.shadowOpacity = 0.40
         topIslandBar.layer?.shadowOffset = CGSize(width: 0, height: -2)
+        
+        let topIslandEffect = NSVisualEffectView(frame: topIslandBar.bounds)
+        topIslandEffect.material = .hudWindow
+        topIslandEffect.blendingMode = .behindWindow
+        topIslandEffect.state = .active
+        topIslandEffect.wantsLayer = true
+        topIslandEffect.layer?.cornerRadius = 18
+        topIslandEffect.layer?.masksToBounds = true
+        topIslandEffect.layer?.borderWidth = 1.0
+        // Golden Gate Golden Hour rim light
+        topIslandEffect.layer?.borderColor = NSColor(red: 0.98, green: 0.6, blue: 0.1, alpha: 0.3).cgColor
+        topIslandEffect.autoresizingMask = [.width, .height]
+        topIslandBar.addSubview(topIslandEffect)
+        
         fullModeContainer.addSubview(topIslandBar)
         
-        // Left: Animated Glowing Emerald Waveform (16 bars)
-        waveformVisualizer = AudioVisualizerView(frame: NSRect(x: 18, y: 14, width: 130, height: 40), mode: .waveform(barCount: 16))
-        waveformVisualizer.tintColor = NSColor(red: 0.10, green: 0.88, blue: 0.52, alpha: 1.0)
+        // Left: Animated Glowing Orange Waveform (16 bars)
+        waveformVisualizer = AudioVisualizerView(frame: NSRect(x: 18, y: 14, width: 120, height: 40), mode: .waveform(barCount: 16))
+        waveformVisualizer.tintColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 1.0)
         topIslandBar.addSubview(waveformVisualizer)
         
-        // Center: Language Selector Capsule
-        languageSelectorBar = LanguageSelectorBarView(frame: NSRect(x: (880 - 296) / 2.0, y: 10, width: 296, height: 48))
+        // Right: 7 Action Buttons (Share, Audio Test, Log, Pause, Compact, Pin, Close)
+        let rightStartX: CGFloat = 880 - 334
+        
+        shareActionBtn = HUDActionButton(iconName: "square.and.arrow.up", title: "Share", toolTip: "Share Captions (⌘S)") { [weak self] in
+            self?.openShare()
+        }
+        shareActionBtn.frame.origin = CGPoint(x: rightStartX, y: 9)
+        topIslandBar.addSubview(shareActionBtn)
+        
+        testAudioActionBtn = HUDActionButton(iconName: "speaker.wave.2.fill", title: "Audio", toolTip: "Audio & Microphone Setup") { [weak self] in
+            self?.testMicAction()
+        }
+        testAudioActionBtn.frame.origin = CGPoint(x: rightStartX + 46, y: 9)
+        topIslandBar.addSubview(testAudioActionBtn)
+        
+        logActionBtn = HUDActionButton(iconName: "list.bullet", title: "Log", toolTip: "Transcript History (⌘T)") { [weak self] in
+            self?.openTranscript()
+        }
+        logActionBtn.frame.origin = CGPoint(x: rightStartX + 92, y: 9)
+        topIslandBar.addSubview(logActionBtn)
+        
+        pauseActionBtn = HUDActionButton(iconName: "pause.fill", title: "Pause", toolTip: "Pause Captions (Space)") { [weak self] in
+            self?.togglePlayPause()
+        }
+        pauseActionBtn.frame.origin = CGPoint(x: rightStartX + 138, y: 9)
+        topIslandBar.addSubview(pauseActionBtn)
+        
+        compactActionBtn = HUDActionButton(iconName: "arrow.down.right.and.arrow.up.left", title: "Compact", toolTip: "Compact Mode (⌘M)") { [weak self] in
+            self?.toggleCompactMode()
+        }
+        compactActionBtn.frame.origin = CGPoint(x: rightStartX + 184, y: 9)
+        topIslandBar.addSubview(compactActionBtn)
+        
+        pinActionBtn = HUDActionButton(iconName: "pin.fill", title: "Pin", toolTip: "Keep on Top") { [weak self] in
+            self?.pinToggleAction()
+        }
+        pinActionBtn.frame.origin = CGPoint(x: rightStartX + 230, y: 9)
+        topIslandBar.addSubview(pinActionBtn)
+        
+        closeActionBtn = HUDActionButton(iconName: "xmark", title: "Close", toolTip: "Close (⌘W)", isDestructive: true) { [weak self] in
+            self?.closeBtnAction()
+        }
+        closeActionBtn.frame.origin = CGPoint(x: rightStartX + 276, y: 9)
+        topIslandBar.addSubview(closeActionBtn)
+        
+        // Center: Language Selector Capsule mathematically centered between left visualizer and right actions
+        let centerAvailableWidth = rightStartX - 138
+        let langX = 138 + (centerAvailableWidth - 296) / 2.0
+        languageSelectorBar = LanguageSelectorBarView(frame: NSRect(x: langX, y: 10, width: 296, height: 48))
         languageSelectorBar.userLanguageIndex = 1 // Default English
         languageSelectorBar.callerLanguageIndex = 0 // Default Spanish
         languageSelectorBar.onLanguageChanged = { [weak self] isUser, newIndex in
@@ -810,74 +895,38 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
         }
         topIslandBar.addSubview(languageSelectorBar)
         
-        // Right: 7 Action Buttons (Share, Audio Test, Log, Pause, Compact, Pin, Close)
-        let rightStartX: CGFloat = 880 - 296
-        
-        shareActionBtn = HUDActionButton(iconName: "square.and.arrow.up", title: "Share", toolTip: "Share with Phone (⌘S)") { [weak self] in
-            self?.openShare()
-        }
-        shareActionBtn.frame.origin = CGPoint(x: rightStartX, y: 9)
-        topIslandBar.addSubview(shareActionBtn)
-        
-        testAudioActionBtn = HUDActionButton(iconName: "speaker.wave.2.fill", title: "Audio Test", toolTip: "Test Microphone & Audio") { [weak self] in
-            self?.testMicAction()
-        }
-        testAudioActionBtn.frame.origin = CGPoint(x: rightStartX + 42, y: 9)
-        topIslandBar.addSubview(testAudioActionBtn)
-        
-        logActionBtn = HUDActionButton(iconName: "list.bullet", title: "Log", toolTip: "Transcript Log (⌘T)") { [weak self] in
-            self?.openTranscript()
-        }
-        logActionBtn.frame.origin = CGPoint(x: rightStartX + 84, y: 9)
-        topIslandBar.addSubview(logActionBtn)
-        
-        pauseActionBtn = HUDActionButton(iconName: "pause.fill", title: "Pause", toolTip: "Pause / Resume (Space)") { [weak self] in
-            self?.togglePlayPause()
-        }
-        pauseActionBtn.frame.origin = CGPoint(x: rightStartX + 126, y: 9)
-        topIslandBar.addSubview(pauseActionBtn)
-        
-        compactActionBtn = HUDActionButton(iconName: "arrow.down.right.and.arrow.up.left", title: "Compact", toolTip: "Switch to Compact Pill (⌘M)") { [weak self] in
-            self?.toggleCompactMode()
-        }
-        compactActionBtn.frame.origin = CGPoint(x: rightStartX + 168, y: 9)
-        topIslandBar.addSubview(compactActionBtn)
-        
-        pinActionBtn = HUDActionButton(iconName: "pin.fill", title: "Pin", toolTip: "Always on Top") { [weak self] in
-            self?.pinToggleAction()
-        }
-        pinActionBtn.frame.origin = CGPoint(x: rightStartX + 210, y: 9)
-        topIslandBar.addSubview(pinActionBtn)
-        
-        closeActionBtn = HUDActionButton(iconName: "xmark", title: "Close", toolTip: "Close / Hide (⌘W)") { [weak self] in
-            self?.closeBtnAction()
-        }
-        closeActionBtn.frame.origin = CGPoint(x: rightStartX + 252, y: 9)
-        topIslandBar.addSubview(closeActionBtn)
-        
         // ----------------------------------------------------
-        // 2. CALLER SUBTITLE CARD (Emerald Glow)
+        // 2. CALLER SUBTITLE CARD (Orange Glow)
         // ----------------------------------------------------
         callerCard = NSView(frame: NSRect(x: 0, y: 108, width: 880, height: 96))
         callerCard.wantsLayer = true
-        callerCard.layer?.cornerRadius = 18
-        callerCard.layer?.backgroundColor = NSColor(red: 0.05, green: 0.09, blue: 0.07, alpha: 0.90).cgColor
-        callerCard.layer?.borderWidth = 1.5
-        callerCard.layer?.borderColor = NSColor(red: 0.10, green: 0.88, blue: 0.52, alpha: 0.95).cgColor
-        callerCard.layer?.shadowColor = NSColor(red: 0.10, green: 0.88, blue: 0.52, alpha: 1.0).cgColor
+        callerCard.layer?.shadowColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 0.6).cgColor
         callerCard.layer?.shadowRadius = 12
         callerCard.layer?.shadowOpacity = 0.45
         callerCard.layer?.shadowOffset = .zero
+        
+        let callerCardEffect = NSVisualEffectView(frame: callerCard.bounds)
+        callerCardEffect.material = .popover
+        callerCardEffect.blendingMode = .behindWindow
+        callerCardEffect.state = .active
+        callerCardEffect.wantsLayer = true
+        callerCardEffect.layer?.cornerRadius = 18
+        callerCardEffect.layer?.masksToBounds = true
+        callerCardEffect.layer?.borderWidth = 1.5
+        callerCardEffect.layer?.borderColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 0.8).cgColor
+        callerCardEffect.autoresizingMask = [.width, .height]
+        callerCard.addSubview(callerCardEffect)
+        
         fullModeContainer.addSubview(callerCard)
         
-        callerHeaderLabel = NSTextField(labelWithString: "Caller (Spanish to English):")
-        callerHeaderLabel.font = NSFont.systemFont(ofSize: 14.5, weight: .semibold)
-        callerHeaderLabel.textColor = NSColor(red: 0.20, green: 0.88, blue: 0.50, alpha: 1.0)
+        callerHeaderLabel = NSTextField(labelWithString: "Caller · Spanish → English")
+        callerHeaderLabel.font = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
+        callerHeaderLabel.textColor = NSColor(red: 0.98, green: 0.5, blue: 0.2, alpha: 1.0)
         callerHeaderLabel.frame = NSRect(x: 22, y: 64, width: 836, height: 20)
         callerCard.addSubview(callerHeaderLabel)
         
         callerSubtitleLabel = NSTextField(labelWithString: "Hello, how are you doing today?")
-        callerSubtitleLabel.font = NSFont.systemFont(ofSize: 21, weight: .regular)
+        callerSubtitleLabel.font = NSFont.systemFont(ofSize: 20, weight: .medium)
         callerSubtitleLabel.textColor = .white
         callerSubtitleLabel.maximumNumberOfLines = 2
         callerSubtitleLabel.cell?.lineBreakMode = .byWordWrapping
@@ -885,28 +934,37 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
         callerCard.addSubview(callerSubtitleLabel)
         
         // ----------------------------------------------------
-        // 3. YOU SUBTITLE CARD (Electric Cyan Glow)
+        // 3. YOU SUBTITLE CARD (Golden Hour Glow)
         // ----------------------------------------------------
         youCard = NSView(frame: NSRect(x: 0, y: 0, width: 880, height: 96))
         youCard.wantsLayer = true
-        youCard.layer?.cornerRadius = 18
-        youCard.layer?.backgroundColor = NSColor(red: 0.03, green: 0.07, blue: 0.12, alpha: 0.90).cgColor
-        youCard.layer?.borderWidth = 1.5
-        youCard.layer?.borderColor = NSColor(red: 0.06, green: 0.75, blue: 0.95, alpha: 0.95).cgColor
-        youCard.layer?.shadowColor = NSColor(red: 0.06, green: 0.75, blue: 0.95, alpha: 1.0).cgColor
+        youCard.layer?.shadowColor = NSColor(red: 0.98, green: 0.6, blue: 0.1, alpha: 0.6).cgColor
         youCard.layer?.shadowRadius = 12
         youCard.layer?.shadowOpacity = 0.45
         youCard.layer?.shadowOffset = .zero
+        
+        let youCardEffect = NSVisualEffectView(frame: youCard.bounds)
+        youCardEffect.material = .popover
+        youCardEffect.blendingMode = .behindWindow
+        youCardEffect.state = .active
+        youCardEffect.wantsLayer = true
+        youCardEffect.layer?.cornerRadius = 18
+        youCardEffect.layer?.masksToBounds = true
+        youCardEffect.layer?.borderWidth = 1.5
+        youCardEffect.layer?.borderColor = NSColor(red: 0.98, green: 0.6, blue: 0.1, alpha: 0.8).cgColor
+        youCardEffect.autoresizingMask = [.width, .height]
+        youCard.addSubview(youCardEffect)
+        
         fullModeContainer.addSubview(youCard)
         
-        youHeaderLabel = NSTextField(labelWithString: "You (English to Spanish):")
-        youHeaderLabel.font = NSFont.systemFont(ofSize: 14.5, weight: .semibold)
-        youHeaderLabel.textColor = NSColor(red: 0.25, green: 0.80, blue: 1.0, alpha: 1.0)
+        youHeaderLabel = NSTextField(labelWithString: "You · English → Spanish")
+        youHeaderLabel.font = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
+        youHeaderLabel.textColor = NSColor(red: 0.98, green: 0.7, blue: 0.3, alpha: 1.0)
         youHeaderLabel.frame = NSRect(x: 22, y: 64, width: 836, height: 20)
         youCard.addSubview(youHeaderLabel)
         
         youSubtitleLabel = NSTextField(labelWithString: "I am doing great, can you hear me clearly?")
-        youSubtitleLabel.font = NSFont.systemFont(ofSize: 21, weight: .regular)
+        youSubtitleLabel.font = NSFont.systemFont(ofSize: 20, weight: .medium)
         youSubtitleLabel.textColor = .white
         youSubtitleLabel.maximumNumberOfLines = 2
         youSubtitleLabel.cell?.lineBreakMode = .byWordWrapping
@@ -919,32 +977,41 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
     private func setupCompactModeUI() {
         compactPill = NSView(frame: NSRect(x: 0, y: 0, width: 780, height: 50))
         compactPill.wantsLayer = true
-        compactPill.layer?.cornerRadius = 25
-        compactPill.layer?.borderWidth = 1.0
-        compactPill.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
-        compactPill.layer?.backgroundColor = NSColor(red: 0.06, green: 0.07, blue: 0.09, alpha: 0.96).cgColor
         compactPill.layer?.shadowColor = NSColor.black.cgColor
         compactPill.layer?.shadowRadius = 14
         compactPill.layer?.shadowOpacity = 0.55
         compactPill.layer?.shadowOffset = CGSize(width: 0, height: -3)
         compactPill.isHidden = !isCompactMode
+        
+        let compactEffect = NSVisualEffectView(frame: compactPill.bounds)
+        compactEffect.material = .hudWindow
+        compactEffect.blendingMode = .behindWindow
+        compactEffect.state = .active
+        compactEffect.wantsLayer = true
+        compactEffect.layer?.cornerRadius = 25
+        compactEffect.layer?.masksToBounds = true
+        compactEffect.layer?.borderWidth = 1.0
+        compactEffect.layer?.borderColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 0.4).cgColor
+        compactEffect.autoresizingMask = [.width, .height]
+        compactPill.addSubview(compactEffect)
+        
         mainContainer.addSubview(compactPill)
         
-        // 1. Left Glowing Green Dot with radiant ambient bloom halo
+        // 1. Left Glowing Orange Dot with radiant ambient bloom halo
         let dotContainer = NSView(frame: NSRect(x: 14, y: 15, width: 20, height: 20))
         dotContainer.wantsLayer = true
         
         let halo = NSView(frame: NSRect(x: 1, y: 1, width: 18, height: 18))
         halo.wantsLayer = true
         halo.layer?.cornerRadius = 9
-        halo.layer?.backgroundColor = NSColor(red: 0.20, green: 0.88, blue: 0.50, alpha: 0.25).cgColor
+        halo.layer?.backgroundColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 0.25).cgColor
         dotContainer.addSubview(halo)
         
         compactGreenDot = NSView(frame: NSRect(x: 5, y: 5, width: 10, height: 10))
         compactGreenDot.wantsLayer = true
         compactGreenDot.layer?.cornerRadius = 5
-        compactGreenDot.layer?.backgroundColor = NSColor(red: 0.20, green: 0.88, blue: 0.50, alpha: 1.0).cgColor
-        compactGreenDot.layer?.shadowColor = NSColor(red: 0.20, green: 0.88, blue: 0.50, alpha: 1.0).cgColor
+        compactGreenDot.layer?.backgroundColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 1.0).cgColor
+        compactGreenDot.layer?.shadowColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 1.0).cgColor
         compactGreenDot.layer?.shadowRadius = 8
         compactGreenDot.layer?.shadowOpacity = 0.95
         compactGreenDot.layer?.shadowOffset = .zero
@@ -976,32 +1043,32 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
         compactSubtitleLabel.isBordered = false
         compactSubtitleLabel.drawsBackground = false
         compactSubtitleLabel.lineBreakMode = .byTruncatingTail
-        compactSubtitleLabel.frame = NSRect(x: 178, y: 13, width: 780 - 178 - 150, height: 24)
+        compactSubtitleLabel.frame = NSRect(x: 178, y: 13, width: 780 - 376, height: 24)
         compactPill.addSubview(compactSubtitleLabel)
         
-        // 4. Right Controls Dock: QR Code, Equalizer, Pause, Expand, Pin
-        let rightX: CGFloat = 780 - 146
+        // 4. Right Controls Dock: QR Code, Equalizer, Pause, Expand, Pin, Close
+        let rightPillWidth: CGFloat = 780
         
         // QR Code button
         compactQRBtn = HUDCompactButton(
-            frame: NSRect(x: rightX, y: 13, width: 24, height: 24),
+            frame: NSRect(x: rightPillWidth - 188, y: 13, width: 24, height: 24),
             iconName: "qrcode",
-            toolTip: "Share Live Subtitles with Phone (⌘S)",
+            toolTip: "Share Captions (⌘S)",
             target: self,
             action: #selector(openShare)
         )
         compactPill.addSubview(compactQRBtn)
         
         // 4-Bar Micro Equalizer
-        compactEqualizerView = AudioVisualizerView(frame: NSRect(x: rightX + 27, y: 18, width: 18, height: 14), mode: .equalizer(barCount: 4))
-        compactEqualizerView.tintColor = NSColor(red: 0.10, green: 0.88, blue: 0.52, alpha: 1.0)
+        compactEqualizerView = AudioVisualizerView(frame: NSRect(x: rightPillWidth - 158, y: 18, width: 18, height: 14), mode: .equalizer(barCount: 4))
+        compactEqualizerView.tintColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 1.0)
         compactPill.addSubview(compactEqualizerView)
         
         // Pause Button
         compactPauseBtn = HUDCompactButton(
-            frame: NSRect(x: rightX + 51, y: 13, width: 24, height: 24),
+            frame: NSRect(x: rightPillWidth - 134, y: 13, width: 24, height: 24),
             iconName: "pause.fill",
-            toolTip: "Pause / Resume (Space)",
+            toolTip: "Pause Captions (Space)",
             target: self,
             action: #selector(togglePlayPause)
         )
@@ -1009,9 +1076,9 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
         
         // Expand to Full Mode Button (⤢)
         compactExpandBtn = HUDCompactButton(
-            frame: NSRect(x: rightX + 78, y: 13, width: 24, height: 24),
+            frame: NSRect(x: rightPillWidth - 104, y: 13, width: 24, height: 24),
             iconName: "arrow.up.left.and.arrow.down.right",
-            toolTip: "Expand to Full Dynamic Island HUD (⌘M)",
+            toolTip: "Expanded Mode (⌘M)",
             target: self,
             action: #selector(toggleCompactMode)
         )
@@ -1019,13 +1086,29 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
         
         // Pin Button
         compactPinBtn = HUDCompactButton(
-            frame: NSRect(x: rightX + 104, y: 13, width: 24, height: 24),
+            frame: NSRect(x: rightPillWidth - 74, y: 13, width: 24, height: 24),
             iconName: "pin.fill",
-            toolTip: "Always on Top: Enabled",
+            toolTip: "Keep on Top",
             target: self,
             action: #selector(pinToggleAction)
         )
         compactPill.addSubview(compactPinBtn)
+        
+        // Close Button
+        compactCloseBtn = HUDCompactButton(
+            frame: NSRect(x: rightPillWidth - 44, y: 13, width: 24, height: 24),
+            iconName: "xmark.circle.fill",
+            toolTip: "Close (⌘W)",
+            target: self,
+            action: #selector(closeBtnAction)
+        )
+        // Make the close button red for standard window behavior
+        if let closeImg = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close") {
+            let config = NSImage.SymbolConfiguration(pointSize: 13.5, weight: .semibold)
+            compactCloseBtn.image = closeImg.withSymbolConfiguration(config)
+            compactCloseBtn.contentTintColor = NSColor.systemRed
+        }
+        compactPill.addSubview(compactCloseBtn)
     }
     
     private func setupPermissionBanner() {
@@ -1038,14 +1121,14 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
         permissionBanner.isHidden = true
         permissionBanner.layer?.zPosition = 999
         
-        permissionMessageLabel = NSTextField(labelWithString: "⚠️ Permission needed for speech recognition or call audio")
-        permissionMessageLabel.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        permissionMessageLabel = NSTextField(labelWithString: "Permission required for speech recognition or call audio")
+        permissionMessageLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         permissionMessageLabel.textColor = .white
         permissionBanner.addSubview(permissionMessageLabel)
         
-        let settingsBtn = NSButton(title: "⚙️ Open Settings", target: self, action: #selector(openCurrentPermissionSettings))
+        let settingsBtn = NSButton(title: "Open Settings", target: self, action: #selector(openCurrentPermissionSettings))
         settingsBtn.bezelStyle = .texturedRounded
-        settingsBtn.font = NSFont.systemFont(ofSize: 10, weight: .bold)
+        settingsBtn.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
         permissionBanner.addSubview(settingsBtn)
         
         let dismissBtn = NSButton(title: "✕", target: self, action: #selector(hidePermissionBanner))
@@ -1067,8 +1150,8 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
         compactLangRouteView?.callerLanguageIndex = languageSelectorBar.callerLanguageIndex
         compactLangRouteView?.updateDisplay()
         
-        callerHeaderLabel.stringValue = "Caller (\(callerLang.name) to \(userLang.name)):"
-        youHeaderLabel.stringValue = "You (\(userLang.name) to \(callerLang.name)):"
+        callerHeaderLabel.stringValue = "Caller · \(callerLang.name) → \(userLang.name)"
+        youHeaderLabel.stringValue = "You · \(userLang.name) → \(callerLang.name)"
         
         WebCaptionServer.shared.setLanguages(hostCode: userLang.code, callerCode: callerLang.code)
     }
@@ -1076,7 +1159,6 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
     private func updateCompactSubtitle() {
         guard compactSubtitleLabel != nil else { return }
         
-        // In compact mode, strictly display the caller's translated caption
         let displayText: String
         if lastCallerText.isEmpty {
             displayText = "Hello, how are you doing today?"
@@ -1085,6 +1167,27 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
         }
         
         compactSubtitleLabel.stringValue = displayText
+        
+        if isCompactMode, let window = view.window {
+            let font = compactSubtitleLabel.font ?? NSFont.systemFont(ofSize: 15)
+            let textWidth = (displayText as NSString).size(withAttributes: [.font: font]).width
+            let screenWidth = (window.screen?.visibleFrame.width ?? 1440) - 40
+            let targetWidth = max(520, min(textWidth + 376 + 24, screenWidth))
+            
+            var frame = window.frame
+            let widthDiff = targetWidth - frame.width
+            frame.origin.x -= widthDiff / 2.0
+            frame.size.width = targetWidth
+            
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.15
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                window.animator().setFrame(frame, display: true)
+            }, completionHandler: { [weak self] in
+                self?.layoutAllViews()
+            })
+            layoutAllViews()
+        }
     }
     
     private func languageChanged() {
@@ -1109,14 +1212,19 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
             normalWindowFrame = currentFrame
             isCompactMode = true
             
-            let targetWidth: CGFloat = 780
+            let displayText = lastCallerText.isEmpty ? "Hello, how are you doing today?" : lastCallerText
+            let font = compactSubtitleLabel.font ?? NSFont.systemFont(ofSize: 15)
+            let textWidth = (displayText as NSString).size(withAttributes: [.font: font]).width
+            let screenWidth = screen.width - 40
+            let targetWidth = max(520, min(textWidth + 376 + 24, screenWidth))
             let targetHeight: CGFloat = 50
             
             let currentTopY = currentFrame.origin.y + currentFrame.height
             var targetY = currentTopY - targetHeight
             targetY = max(screen.minY + 20, min(screen.maxY - targetHeight, targetY))
             
-            var targetX = currentFrame.origin.x
+            let currentCenterX = currentFrame.origin.x + (currentFrame.width / 2.0)
+            var targetX = currentCenterX - (targetWidth / 2.0)
             targetX = max(screen.minX + 10, min(screen.maxX - targetWidth - 10, targetX))
             
             let targetFrame = NSRect(x: targetX, y: targetY, width: targetWidth, height: targetHeight)
@@ -1180,26 +1288,39 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
         if isCompactMode {
             compactPill.isHidden = false
             fullModeContainer.isHidden = true
-            compactPill.frame = NSRect(x: (width - 780) / 2.0, y: (height - 50) / 2.0, width: 780, height: 50)
+            compactPill.frame = NSRect(x: 0, y: (height - 50) / 2.0, width: width, height: 50)
             compactLangRouteView.frame = NSRect(x: 40, y: 11, width: 128, height: 28)
-            compactSubtitleLabel.frame = NSRect(x: 178, y: 13, width: 780 - 178 - 150, height: 24)
+            compactSubtitleLabel.frame = NSRect(x: 178, y: 13, width: max(100, width - 376), height: 24)
+            
+            compactQRBtn?.frame.origin.x = width - 188
+            compactEqualizerView?.frame.origin.x = width - 158
+            compactPauseBtn?.frame.origin.x = width - 134
+            compactExpandBtn?.frame.origin.x = width - 104
+            compactPinBtn?.frame.origin.x = width - 74
+            compactCloseBtn?.frame.origin.x = width - 44
         } else {
             compactPill.isHidden = true
             fullModeContainer.isHidden = false
             fullModeContainer.frame = view.bounds
             topIslandBar.frame = NSRect(x: 0, y: height - 68, width: width, height: 68)
             
-            let rightStartX = width - 296
-            shareActionBtn.frame.origin.x = rightStartX
-            testAudioActionBtn.frame.origin.x = rightStartX + 42
-            logActionBtn.frame.origin.x = rightStartX + 84
-            pauseActionBtn.frame.origin.x = rightStartX + 126
-            compactActionBtn.frame.origin.x = rightStartX + 168
-            pinActionBtn.frame.origin.x = rightStartX + 210
-            closeActionBtn.frame.origin.x = rightStartX + 252
+            // Left: Waveform (ends at 138)
+            waveformVisualizer.frame = NSRect(x: 18, y: 14, width: 120, height: 40)
             
-            waveformVisualizer.frame = NSRect(x: 18, y: 14, width: 130, height: 40)
-            languageSelectorBar.frame = NSRect(x: (width - 296) / 2.0, y: 10, width: 296, height: 48)
+            // Right: 7 Action Buttons (cluster from width - 334 to width - 18)
+            let rightStartX = width - 334
+            shareActionBtn.frame.origin.x = rightStartX
+            testAudioActionBtn.frame.origin.x = rightStartX + 46
+            logActionBtn.frame.origin.x = rightStartX + 92
+            pauseActionBtn.frame.origin.x = rightStartX + 138
+            compactActionBtn.frame.origin.x = rightStartX + 184
+            pinActionBtn.frame.origin.x = rightStartX + 230
+            closeActionBtn.frame.origin.x = rightStartX + 276
+            
+            // Center: Language Selector mathematically centered between left visualizer and right actions
+            let centerAvailableWidth = rightStartX - 138
+            let langX = 138 + (centerAvailableWidth - 296) / 2.0
+            languageSelectorBar.frame = NSRect(x: langX, y: 10, width: 296, height: 48)
             
             let cardHeight: CGFloat = (height - 68 - 20) / 2.0
             callerCard.frame = NSRect(x: 0, y: cardHeight + 10, width: width, height: cardHeight)

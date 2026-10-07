@@ -3,6 +3,7 @@ import AVFoundation
 import ScreenCaptureKit
 import CoreMedia
 import AppKit
+import os
 
 public enum AudioSourceMode: String, CaseIterable {
     case bidirectional = "2-Way (Call + My Voice)"
@@ -25,9 +26,18 @@ public extension AudioCaptureDelegate {
 }
 
 public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    private let stateLock = OSAllocatedUnfairLock()
     public weak var delegate: AudioCaptureDelegate?
-    public private(set) var currentMode: AudioSourceMode = .bidirectional
-    public private(set) var isRunning: Bool = false
+    
+    private var _currentMode: AudioSourceMode = .bidirectional
+    public var currentMode: AudioSourceMode {
+        stateLock.withLock { _currentMode }
+    }
+    
+    private var _isRunning: Bool = false
+    public var isRunning: Bool {
+        stateLock.withLock { _isRunning }
+    }
     
     // ScreenCaptureKit stream (Caller's voice via Call audio)
     private var scStream: SCStream?
@@ -74,7 +84,6 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
         NSLog("[AudioCaptureEngine] Audio hardware reconfiguration detected (call started/ended or route changed).")
         guard isRunning, (currentMode == .bidirectional || currentMode == .micOnly) else { return }
         
-        audioRecoveryWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self = self, self.isRunning else { return }
             do {
@@ -84,7 +93,11 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
                 NSLog("[AudioCaptureEngine] Microphone recovery error: \(error)")
             }
         }
-        audioRecoveryWorkItem = item
+        stateLock.withLock {
+            audioRecoveryWorkItem?.cancel()
+            audioRecoveryWorkItem = item
+        }
+        
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: item)
     }
     
@@ -94,7 +107,8 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
             self?.watchdogTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
                 guard let self = self, self.isRunning else { return }
                 if self.currentMode == .bidirectional || self.currentMode == .micOnly {
-                    if let engine = self.audioEngine, !engine.isRunning {
+                    let engine = self.stateLock.withLock { self.audioEngine }
+                    if let engine = engine, !engine.isRunning {
                         NSLog("[AudioCaptureEngine] Watchdog: Engine stopped during call. Restarting microphone...")
                         try? self.restartMicrophoneAudio()
                     }
@@ -127,12 +141,20 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
     // MARK: - Start / Stop
     
     public func start(mode: AudioSourceMode = .bidirectional) async throws {
-        if isStartingEngine { return }
-        isStartingEngine = true
-        defer { isStartingEngine = false }
+        let alreadyStarting = stateLock.withLock { () -> Bool in
+            if isStartingEngine { return true }
+            isStartingEngine = true
+            return false
+        }
+        if alreadyStarting { return }
+        
+        defer {
+            stateLock.withLock { isStartingEngine = false }
+        }
         
         stop()
-        self.currentMode = mode
+        
+        stateLock.withLock { _currentMode = mode }
         
         var startedAny = false
         var errors: [String] = []
@@ -142,7 +164,7 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
             do {
                 try startMicrophoneAudio()
                 startedAny = true
-                self.isRunning = true
+                stateLock.withLock { _isRunning = true }
                 NSLog("[AudioCaptureEngine] Microphone audio started successfully")
             } catch {
                 NSLog("[AudioCaptureEngine] Microphone audio failed: \(error)")
@@ -155,7 +177,7 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
             do {
                 try await startScreenCaptureAudio()
                 startedAny = true
-                self.isRunning = true
+                stateLock.withLock { _isRunning = true }
                 NSLog("[AudioCaptureEngine] System Call Audio started successfully")
             } catch {
                 NSLog("[AudioCaptureEngine] System Call Audio failed: \(error)")
@@ -164,35 +186,44 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
         }
         
         if !startedAny && !errors.isEmpty {
-            self.isRunning = false
+            stateLock.withLock { _isRunning = false }
             let err = NSError(domain: "AudioCaptureEngine", code: -99, userInfo: [NSLocalizedDescriptionKey: errors.joined(separator: "\n")])
             throw err
         }
         
-        self.isRunning = startedAny
+        stateLock.withLock { _isRunning = startedAny }
+        
         if startedAny {
             startWatchdog()
         }
     }
     
     public func stop() {
-        isRunning = false
+        let (streamToStop, engineToStop, workItemToCancel) = stateLock.withLock { () -> (SCStream?, AVAudioEngine?, DispatchWorkItem?) in
+            _isRunning = false
+            let s = scStream
+            scStream = nil
+            let e = audioEngine
+            audioEngine = nil
+            let w = audioRecoveryWorkItem
+            audioRecoveryWorkItem = nil
+            return (s, e, w)
+        }
+        
         stopWatchdog()
-        audioRecoveryWorkItem?.cancel()
+        workItemToCancel?.cancel()
         
         // Stop ScreenCaptureKit
-        if let stream = scStream {
+        if let stream = streamToStop {
             stream.stopCapture { _ in }
-            scStream = nil
         }
         
         // Stop AVAudioEngine
-        if let engine = audioEngine {
+        if let engine = engineToStop {
             if engine.isRunning {
                 engine.stop()
             }
             engine.inputNode.removeTap(onBus: 0)
-            audioEngine = nil
         }
         
         delegate?.audioCaptureDidUpdateCallerLevel(0)
@@ -230,7 +261,9 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
         try? stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: callerQueue)
         
         try await stream.startCapture()
-        self.scStream = stream
+        
+        stateLock.withLock { self.scStream = stream }
+        
         NSLog("[AudioCapture] ScreenCaptureKit audio capture started successfully (Caller)")
     }
     
@@ -251,7 +284,10 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
     
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
         NSLog("[AudioCapture] SCStream stopped with error: \(error). Reconnecting...")
-        if isRunning && (currentMode == .bidirectional || currentMode == .callerOnly) {
+        
+        let (running, mode) = stateLock.withLock { (_isRunning, _currentMode) }
+        
+        if running && (mode == .bidirectional || mode == .callerOnly) {
             Task {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 try? await self.startScreenCaptureAudio()
@@ -262,7 +298,9 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
     // MARK: - Microphone Implementation (Your Voice)
     
     public func restartMicrophoneAudio() throws {
-        if let engine = audioEngine {
+        let engine = stateLock.withLock { audioEngine }
+        
+        if let engine = engine {
             if engine.isRunning {
                 engine.stop()
             }
@@ -288,7 +326,7 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
             throw err
         }
 
-        let engine = audioEngine ?? AVAudioEngine()
+        let engine = stateLock.withLock { audioEngine ?? AVAudioEngine() }
         let inputNode = engine.inputNode
         
         // Remove any existing tap to avoid crash
@@ -313,7 +351,9 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
         if !engine.isRunning {
             try engine.start()
         }
-        self.audioEngine = engine
+        
+        stateLock.withLock { self.audioEngine = engine }
+        
         NSLog("[AudioCapture] Microphone audio capture active: \(format.sampleRate)Hz, \(format.channelCount)ch")
     }
     
@@ -393,21 +433,28 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @un
     
     private func updateCallerAudioLevel(_ rawLevel: Float) {
         let boosted = min(1.0, rawLevel * 12.0)
-        smoothedCallerLevel = (smoothedCallerLevel * 0.7) + (boosted * 0.3)
+        let newLevel = stateLock.withLock { () -> Float in
+            smoothedCallerLevel = (smoothedCallerLevel * 0.7) + (boosted * 0.3)
+            return smoothedCallerLevel
+        }
         
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.delegate?.audioCaptureDidUpdateCallerLevel(self.smoothedCallerLevel)
+            NotificationCenter.default.post(name: NSNotification.Name("CallerAudioLevelUpdated"), object: nil, userInfo: ["level": newLevel])
+            self.delegate?.audioCaptureDidUpdateCallerLevel(newLevel)
         }
     }
     
     private func updateMyAudioLevel(_ rawLevel: Float) {
         let boosted = min(1.0, rawLevel * 12.0)
-        smoothedMyLevel = (smoothedMyLevel * 0.7) + (boosted * 0.3)
+        let newLevel = stateLock.withLock { () -> Float in
+            smoothedMyLevel = (smoothedMyLevel * 0.7) + (boosted * 0.3)
+            return smoothedMyLevel
+        }
         
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.delegate?.audioCaptureDidUpdateMyLevel(self.smoothedMyLevel)
+            self.delegate?.audioCaptureDidUpdateMyLevel(newLevel)
         }
     }
 }

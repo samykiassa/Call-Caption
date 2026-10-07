@@ -1,10 +1,17 @@
 import AppKit
 
+/// The application delegate responsible for managing the primary lifecycle and UI components.
+///
+/// `AppDelegate` oversees the status bar menu, the heads-up display (HUD) caption window,
+/// system permissions requests, and cleanly tearing down background services upon exit.
 public class AppDelegate: NSObject, NSApplicationDelegate {
     private var hudWindow: HUDCaptionWindow!
     private var hudViewController: HUDCaptionViewController!
     private var statusItem: NSStatusItem!
+    private var popover: NSPopover!
+    public var statusMenu: NSMenu!
     
+    /// Called when the application finishes launching. Sets up the main window, status item, and requests permissions.
     public func applicationDidFinishLaunching(_ notification: Notification) {
         // Configure app to run as an accessory or regular app
         NSApp.setActivationPolicy(.regular)
@@ -28,57 +35,86 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem.button {
-            button.title = "💬 CC"
-            button.toolTip = "Live Call Captions & Translation"
+            if let image = NSImage(systemSymbolName: "captions.bubble.fill", accessibilityDescription: "CallCaption Live Captions") {
+                let config = NSImage.SymbolConfiguration(pointSize: 13.5, weight: .regular)
+                button.image = image.withSymbolConfiguration(config)
+                button.imagePosition = .imageOnly
+            } else {
+                button.title = "CC"
+            }
+            button.toolTip = "CallCaption — Live Captions & Translation"
+            button.action = #selector(togglePopover(_:))
+            button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         
-        let menu = NSMenu()
+        popover = NSPopover()
+        popover.contentViewController = SpanMenuViewController()
+        popover.behavior = .transient
         
-        let showItem = NSMenuItem(title: "Show Captions HUD", action: #selector(showHUD), keyEquivalent: "h")
+        statusMenu = NSMenu()
+        
+        let showItem = NSMenuItem(title: "Show Captions", action: #selector(showHUD), keyEquivalent: "h")
         showItem.target = self
-        menu.addItem(showItem)
+        statusMenu.addItem(showItem)
         
-        let compactItem = NSMenuItem(title: "Toggle Compact Subtitle Banner", action: #selector(toggleCompactMode), keyEquivalent: "m")
+        let compactItem = NSMenuItem(title: "Compact Mode", action: #selector(toggleCompactMode), keyEquivalent: "m")
         compactItem.target = self
-        menu.addItem(compactItem)
+        statusMenu.addItem(compactItem)
         
-        let toggleItem = NSMenuItem(title: "Pause / Resume Captions", action: #selector(toggleHUDCapture), keyEquivalent: "p")
+        let toggleItem = NSMenuItem(title: "Pause Captions", action: #selector(toggleHUDCapture), keyEquivalent: "p")
         toggleItem.target = self
-        menu.addItem(toggleItem)
+        statusMenu.addItem(toggleItem)
         
-        let swapItem = NSMenuItem(title: "Swap Languages (You ⇄ Caller)", action: #selector(swapLanguages), keyEquivalent: "")
+        let swapItem = NSMenuItem(title: "Swap Languages", action: #selector(swapLanguages), keyEquivalent: "")
         swapItem.target = self
-        menu.addItem(swapItem)
+        statusMenu.addItem(swapItem)
         
-        menu.addItem(NSMenuItem.separator())
+        statusMenu.addItem(NSMenuItem.separator())
         
-        let shareItem = NSMenuItem(title: "📱 Share Subtitles with Phone (QR)...", action: #selector(openShareWindow), keyEquivalent: "s")
+        let shareItem = NSMenuItem(title: "Share Captions...", action: #selector(openShareWindow), keyEquivalent: "s")
         shareItem.target = self
-        menu.addItem(shareItem)
+        statusMenu.addItem(shareItem)
         
-        let copyLinkItem = NSMenuItem(title: "📋 Copy Phone Subtitles Link", action: #selector(copyPhoneLink), keyEquivalent: "")
+        let copyLinkItem = NSMenuItem(title: "Copy Web Link", action: #selector(copyPhoneLink), keyEquivalent: "")
         copyLinkItem.target = self
-        menu.addItem(copyLinkItem)
+        statusMenu.addItem(copyLinkItem)
         
-        let transcriptItem = NSMenuItem(title: "📄 View Call Transcript Log...", action: #selector(openTranscriptWindow), keyEquivalent: "t")
+        let transcriptItem = NSMenuItem(title: "Transcript History...", action: #selector(openTranscriptWindow), keyEquivalent: "t")
         transcriptItem.target = self
-        menu.addItem(transcriptItem)
+        statusMenu.addItem(transcriptItem)
         
-        menu.addItem(NSMenuItem.separator())
+        statusMenu.addItem(NSMenuItem.separator())
         
-        let permissionsItem = NSMenuItem(title: "⚙️ System Permissions & Setup...", action: #selector(openPermissions), keyEquivalent: ",")
+        let permissionsItem = NSMenuItem(title: "Audio & Speech Settings...", action: #selector(openPermissions), keyEquivalent: ",")
         permissionsItem.target = self
-        menu.addItem(permissionsItem)
+        statusMenu.addItem(permissionsItem)
         
-        menu.addItem(NSMenuItem.separator())
+        statusMenu.addItem(NSMenuItem.separator())
         
         let quitItem = NSMenuItem(title: "Quit CallCaption", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
-        menu.addItem(quitItem)
-        
-        statusItem.menu = menu
+        statusMenu.addItem(quitItem)
     }
     
+    @objc private func togglePopover(_ sender: AnyObject?) {
+        guard let event = NSApp.currentEvent else { return }
+        if event.type == .rightMouseUp {
+            statusItem.menu = statusMenu
+            statusItem.button?.performClick(nil)
+            statusItem.menu = nil
+        } else {
+            if popover.isShown {
+                popover.performClose(sender)
+            } else {
+                if let button = statusItem.button {
+                    popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+                }
+            }
+        }
+    }
+    
+    /// Displays and focuses the main caption HUD window.
     @objc public func showHUD() {
         hudWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -111,6 +147,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         hudViewController.openTranscript()
     }
     
+    /// Opens the application's permission setup window, typically embedded within the HUD.
     @objc public func openPermissions() {
         hudViewController.openPermissions()
     }
@@ -119,15 +156,19 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
     
+    /// Handles reopening the application (e.g., clicking the dock icon).
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showHUD()
         return true
     }
     
+    /// Determines whether the application should terminate when its last window is closed.
+    /// - Returns: `false` to keep the application running in the menu bar.
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return false // Keep running in menu bar even if window closed
     }
     
+    /// Called before the application terminates. Responsible for stopping web and tunnel background services.
     public func applicationWillTerminate(_ notification: Notification) {
         WebCaptionServer.shared.stop()
         TunnelManager.shared.stop()

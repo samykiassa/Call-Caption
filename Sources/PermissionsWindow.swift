@@ -114,7 +114,7 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "System Permissions & Audio Setup"
+        window.title = "Audio & Speech Permissions"
         window.level = .floating
         window.isReleasedWhenClosed = false
         window.center()
@@ -147,25 +147,28 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         // ------------------------------------------------------------------
         // Header
         // ------------------------------------------------------------------
-        let headerIcon = NSTextField(labelWithString: "⚙️")
-        headerIcon.font = NSFont.systemFont(ofSize: 24)
-        headerIcon.frame = NSRect(x: 24, y: currentY - 6, width: 34, height: 32)
+        let headerIcon = NSImageView(frame: NSRect(x: 24, y: currentY - 2, width: 26, height: 26))
+        if let icon = NSImage(systemSymbolName: "gearshape.2.fill", accessibilityDescription: "Permissions") {
+            let config = NSImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+            headerIcon.image = icon.withSymbolConfiguration(config)
+            headerIcon.contentTintColor = NSColor(red: 0.98, green: 0.38, blue: 0.08, alpha: 1.0)
+        }
         contentView.addSubview(headerIcon)
         
-        let titleLabel = NSTextField(labelWithString: "System Permissions & Audio Setup")
+        let titleLabel = NSTextField(labelWithString: "Audio & Speech Permissions")
         titleLabel.font = NSFont.systemFont(ofSize: 18, weight: .bold)
         titleLabel.textColor = .white
-        titleLabel.frame = NSRect(x: 64, y: currentY, width: 510, height: 24)
+        titleLabel.frame = NSRect(x: 58, y: currentY, width: 516, height: 24)
         contentView.addSubview(titleLabel)
         
         currentY -= 28
-        let subtitleLabel = NSTextField(labelWithString: "CallCaption requires system permissions to capture call audio and translate both speakers in real-time.")
+        let subtitleLabel = NSTextField(labelWithString: "CallCaption requires system permissions to capture call audio and transcribe conversation in real time.")
         subtitleLabel.font = NSFont.systemFont(ofSize: 11.5, weight: .regular)
         subtitleLabel.textColor = NSColor(white: 0.70, alpha: 1.0)
         subtitleLabel.cell?.wraps = true
         subtitleLabel.cell?.lineBreakMode = .byWordWrapping
         subtitleLabel.maximumNumberOfLines = 2
-        subtitleLabel.frame = NSRect(x: 64, y: currentY - 4, width: 510, height: 32)
+        subtitleLabel.frame = NSRect(x: 58, y: currentY - 4, width: 516, height: 32)
         contentView.addSubview(subtitleLabel)
         
         currentY -= 22
@@ -179,11 +182,11 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         // Permission Cards
         // ------------------------------------------------------------------
         
-        // 1. Microphone Card (Without "Your Voice")
+        // 1. Microphone Card
         currentY -= 82
         let (micCard, mBadge, mBtn) = createPermissionCard(
             frame: NSRect(x: 24, y: currentY, width: 552, height: 82),
-            icon: "🎙️",
+            symbolName: "mic.fill",
             title: "Microphone Access",
             desc: "Captures spoken speech so CallCaption can translate your words for the caller.",
             actionTitle: "Grant Access",
@@ -197,9 +200,9 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         currentY -= 92
         let (speechCard, spBadge, spBtn) = createPermissionCard(
             frame: NSRect(x: 24, y: currentY, width: 552, height: 82),
-            icon: "🗣️",
+            symbolName: "waveform",
             title: "Speech Recognition Engine",
-            desc: "Transcribes spoken audio into text locally with Apple's neural speech engine.",
+            desc: "Transcribes spoken audio locally using Apple's on-device neural speech models.",
             actionTitle: "Authorize Speech",
             actionSelector: #selector(speechActionClicked)
         )
@@ -207,13 +210,13 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         speechStatusBadge = spBadge
         speechActionBtn = spBtn
         
-        // 3. Screen & System Audio Recording Card (Generic Call Audio)
+        // 3. Screen & System Audio Recording Card
         currentY -= 92
         let (screenCard, scBadge, scBtn) = createPermissionCard(
             frame: NSRect(x: 24, y: currentY, width: 552, height: 82),
-            icon: "🖥️",
-            title: "Screen & Audio Recording (Call Audio)",
-            desc: "Directly captures incoming caller audio from calls without virtual cables.",
+            symbolName: "speaker.wave.3.fill",
+            title: "System Audio Capture",
+            desc: "Directly captures caller audio from conference apps without virtual audio drivers.",
             actionTitle: "Open Settings ↗",
             actionSelector: #selector(screenActionClicked)
         )
@@ -222,8 +225,8 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         screenActionBtn = scBtn
         
         currentY -= 14
-        let noteLabel = NSTextField(labelWithString: "ℹ️ Note: macOS requires restarting CallCaption once Screen & Audio Recording is enabled.")
-        noteLabel.font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+        let noteLabel = NSTextField(labelWithString: "Note: macOS requires relaunching CallCaption once System Audio Capture is enabled.")
+        noteLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
         noteLabel.textColor = NSColor(red: 0.95, green: 0.75, blue: 0.25, alpha: 1.0)
         noteLabel.frame = NSRect(x: 28, y: currentY, width: 544, height: 16)
         contentView.addSubview(noteLabel)
@@ -239,19 +242,19 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         testBox.layer?.borderWidth = 1.0
         testBox.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
         
-        let testBoxTitle = NSTextField(labelWithString: "🎙️ Quick Microphone Diagnostic:")
-        testBoxTitle.font = NSFont.systemFont(ofSize: 11.5, weight: .bold)
+        let testBoxTitle = NSTextField(labelWithString: "Microphone Diagnostic")
+        testBoxTitle.font = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
         testBoxTitle.textColor = .white
         testBoxTitle.frame = NSRect(x: 14, y: 36, width: 260, height: 18)
         testBox.addSubview(testBoxTitle)
         
-        micTestLabel = NSTextField(labelWithString: "Click 'Test Mic' and speak to verify your input signal.")
+        micTestLabel = NSTextField(labelWithString: "Click 'Test Microphone' to verify your input signal.")
         micTestLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
         micTestLabel.textColor = NSColor(white: 0.65, alpha: 1.0)
         micTestLabel.frame = NSRect(x: 14, y: 12, width: 380, height: 18)
         testBox.addSubview(micTestLabel)
         
-        testMicBtn = NSButton(title: "Test Mic 🎙️", target: self, action: #selector(testMicClicked))
+        testMicBtn = NSButton(title: "Test Microphone", target: self, action: #selector(testMicClicked))
         testMicBtn.frame = NSRect(x: 410, y: 16, width: 128, height: 32)
         testMicBtn.bezelStyle = .rounded
         testMicBtn.font = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
@@ -270,13 +273,13 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         guideBox.layer?.borderWidth = 1.0
         guideBox.layer?.borderColor = NSColor(red: 0.15, green: 0.50, blue: 0.85, alpha: 0.35).cgColor
         
-        let guideTitle = NSTextField(labelWithString: "💬 Live Call Audio Routing Guide")
-        guideTitle.font = NSFont.systemFont(ofSize: 11.5, weight: .bold)
+        let guideTitle = NSTextField(labelWithString: "Audio Routing Guide")
+        guideTitle.font = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
         guideTitle.textColor = NSColor(red: 0.35, green: 0.75, blue: 1.0, alpha: 1.0)
         guideTitle.frame = NSRect(x: 14, y: 50, width: 520, height: 18)
         guideBox.addSubview(guideTitle)
         
-        let guideDesc = NSTextField(labelWithString: "1. Open your call app's Audio Settings (FaceTime, Zoom, Phone, etc.).\n2. Ensure Audio Output is set to your regular Speakers or Headphones.\n3. CallCaption captures caller audio automatically without extra audio drivers.")
+        let guideDesc = NSTextField(labelWithString: "1. Open your call app's audio settings (FaceTime, Zoom, Meet, etc.).\n2. Verify audio output is set to your preferred speakers or headphones.\n3. CallCaption captures caller audio automatically.")
         guideDesc.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
         guideDesc.textColor = NSColor(white: 0.75, alpha: 1.0)
         guideDesc.cell?.wraps = true
@@ -292,17 +295,17 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         // ------------------------------------------------------------------
         let bottomBar = NSView(frame: NSRect(x: 24, y: 14, width: 552, height: 36))
         
-        let refreshBtn = NSButton(title: "🔄 Refresh", target: self, action: #selector(refreshClicked))
-        refreshBtn.frame = NSRect(x: 0, y: 2, width: 96, height: 32)
+        let refreshBtn = NSButton(title: "Refresh", target: self, action: #selector(refreshClicked))
+        refreshBtn.frame = NSRect(x: 0, y: 2, width: 88, height: 32)
         refreshBtn.bezelStyle = .rounded
         bottomBar.addSubview(refreshBtn)
         
-        let sysSettingsBtn = NSButton(title: "⚙️ System Settings...", target: self, action: #selector(openSysSettingsClicked))
-        sysSettingsBtn.frame = NSRect(x: 104, y: 2, width: 148, height: 32)
+        let sysSettingsBtn = NSButton(title: "System Settings...", target: self, action: #selector(openSysSettingsClicked))
+        sysSettingsBtn.frame = NSRect(x: 96, y: 2, width: 140, height: 32)
         sysSettingsBtn.bezelStyle = .rounded
         bottomBar.addSubview(sysSettingsBtn)
         
-        let restartBtn = NSButton(title: "🔄 Restart App", target: self, action: #selector(restartAppClicked))
+        let restartBtn = NSButton(title: "Relaunch App", target: self, action: #selector(restartAppClicked))
         restartBtn.frame = NSRect(x: 328, y: 2, width: 118, height: 32)
         restartBtn.bezelStyle = .rounded
         bottomBar.addSubview(restartBtn)
@@ -322,7 +325,7 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
     
     private func createPermissionCard(
         frame: NSRect,
-        icon: String,
+        symbolName: String,
         title: String,
         desc: String,
         actionTitle: String,
@@ -335,17 +338,20 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         card.layer?.borderWidth = 1.0
         card.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
         
-        // Icon
-        let iconLabel = NSTextField(labelWithString: icon)
-        iconLabel.font = NSFont.systemFont(ofSize: 22)
-        iconLabel.frame = NSRect(x: 16, y: (frame.height - 30) / 2.0, width: 32, height: 30)
-        card.addSubview(iconLabel)
+        // SF Symbol Icon
+        let iconView = NSImageView(frame: NSRect(x: 16, y: (frame.height - 24) / 2.0, width: 24, height: 24))
+        if let icon = NSImage(systemSymbolName: symbolName, accessibilityDescription: title) {
+            let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+            iconView.image = icon.withSymbolConfiguration(config)
+            iconView.contentTintColor = NSColor(red: 0.98, green: 0.45, blue: 0.15, alpha: 1.0)
+        }
+        card.addSubview(iconView)
         
         // Text details
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .bold)
         titleLabel.textColor = .white
-        titleLabel.frame = NSRect(x: 56, y: 46, width: 320, height: 20)
+        titleLabel.frame = NSRect(x: 52, y: 46, width: 324, height: 20)
         card.addSubview(titleLabel)
         
         let descLabel = NSTextField(labelWithString: desc)
@@ -354,7 +360,7 @@ public class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         descLabel.cell?.wraps = true
         descLabel.cell?.lineBreakMode = .byWordWrapping
         descLabel.maximumNumberOfLines = 2
-        descLabel.frame = NSRect(x: 56, y: 12, width: 320, height: 32)
+        descLabel.frame = NSRect(x: 52, y: 12, width: 324, height: 32)
         card.addSubview(descLabel)
         
         // Mathematically Centered Status Badge Pill
