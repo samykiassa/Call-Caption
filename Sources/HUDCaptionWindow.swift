@@ -977,10 +977,6 @@ public class HUDCaptionViewController: NSViewController, AudioCaptureDelegate, B
     private func setupCompactModeUI() {
         compactPill = NSView(frame: NSRect(x: 0, y: 0, width: 780, height: 50))
         compactPill.wantsLayer = true
-        compactPill.layer?.shadowColor = NSColor.black.cgColor
-        compactPill.layer?.shadowRadius = 14
-        compactPill.layer?.shadowOpacity = 0.55
-        compactPill.layer?.shadowOffset = CGSize(width: 0, height: -3)
         compactPill.isHidden = !isCompactMode
         
         let compactEffect = NSVisualEffectView(frame: compactPill.bounds)
