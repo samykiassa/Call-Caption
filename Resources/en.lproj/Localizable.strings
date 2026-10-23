@@ -1,0 +1,56 @@
+"header.callerLanguage" = "Caller Language";
+"header.yourLanguage" = "Your Language";
+"header.swapLanguages" = "Swap Languages";
+"header.close" = "Close";
+"header.settings" = "Settings";
+"header.pin" = "Pin";
+"header.unpin" = "Unpin";
+"header.copy" = "Copy";
+"header.clear" = "Clear";
+"header.pause" = "Pause";
+"header.resume" = "Resume";
+"header.microphone" = "Microphone";
+"header.liveLink" = "Live Link";
+
+"status.setupRequired" = "Setup Required";
+"status.paused" = "Paused";
+"status.listening" = "Listening";
+
+"settings.title" = "Settings";
+"settings.tab.languages" = "Languages";
+"settings.tab.general" = "General";
+"settings.tab.permissions" = "Permissions";
+"settings.subtitleLanguage" = "Subtitle Language";
+
+"transcript.clearConfirm.title" = "Clear Transcript?";
+"transcript.clearConfirm.message" = "This will permanently remove all caption history from the current session.";
+
+"liveshare.consent.title" = "Start External Live Link?";
+"liveshare.consent.message" = "Live Link streams captions through a public tunnel (localhost.run) to anyone with your link. Captions are encrypted end-to-end.\n\nMake sure call participants consent to caption sharing where required.";
+"liveshare.consent.confirm" = "Start Live Link";
+"liveshare.localConsent.title" = "Start Local Live Link?";
+"liveshare.localConsent.message" = "Local-only mode keeps captions on this Mac or your local network. No external tunnel is opened.\n\nEnsure all call participants have consented to caption sharing where required by law.";
+
+"legal.privacyPolicy" = "Privacy Policy";
+"legal.termsOfUse" = "Terms of Use";
+
+"onboarding.title" = "Welcome to Call Caption";
+"onboarding.subtitle" = "Live captions and translation on your Mac. Audio never leaves your device unless you share a Live Link.";
+"onboarding.consentNotice" = "Recording or transcribing calls may require consent under local laws.";
+"onboarding.startListening" = "Start Listening";
+
+"common.cancel" = "Cancel";
+"common.clear" = "Clear";
+"common.copy" = "Copy";
+"common.copied" = "Copied";
+"common.done" = "Done";
+
+"caption.untranslated" = "Untranslated";
+"error.mic_unavailable" = "Microphone unavailable or invalid audio format";
+
+"transcript.title" = "Transcript";
+"transcript.search" = "Search";
+"transcript.export" = "Export…";
+"transcript.save_title" = "Save Call Transcript";
+"transcript.empty" = "No transcript";
+"transcript.no_results" = "No results";
