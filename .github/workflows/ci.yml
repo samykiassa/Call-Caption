@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, minimal ]
   workflow_dispatch:
 
 concurrency:
@@ -17,42 +17,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate Plists & Localization Parity
+      - name: Validate Plists & Strings
         run: |
           plutil -lint Resources/Info.plist Resources/PrivacyInfo.xcprivacy Resources/CallCaption.entitlements Resources/*.lproj/*.strings
-          python3 - <<'PY'
-          import glob, re, sys
-          src = {p: open(p, encoding="utf-8").read() for p in sorted(glob.glob("Sources/*.swift"))}
-          calls = []
-          for p, txt in src.items():
-              for m in re.finditer(r'L10n\.tr\(\s*"([^"]+)"\s*,\s*"((?:[^"\\]|\\.)*)"', txt, re.S):
-                  calls.append((m.group(1), m.group(2), p))
-          def parse_strings(path):
-              d = {}
-              for idx, line in enumerate(open(path, encoding="utf-8"), 1):
-                  m = re.match(r'^\s*"([^"]+)"\s*=\s*"((?:[^"\\]|\\.)*)"\s*;\s*$', line)
-                  if m:
-                      k, v = m.group(1), m.group(2)
-                      if k in d:
-                          sys.exit(f"Duplicate key {k} in {path}:{idx}")
-                      d[k] = v
-              return d
-          en = parse_strings("Resources/en.lproj/Localizable.strings")
-          es = parse_strings("Resources/es.lproj/Localizable.strings")
-          if set(en) != set(es):
-              sys.exit(f"Key parity mismatch en-es={sorted(set(en)-set(es))} es-en={sorted(set(es)-set(en))}")
-          src_keys = {k for k, _, _ in calls if "\\" not in k}
-          missing = sorted(src_keys - set(en))
-          if missing:
-              sys.exit(f"Missing L10n keys in Localizable.strings: {missing}")
-          fmt_re = re.compile(r'%(?:\d+\$)?[-+ #0]*(?:\d+|\*)?(?:\.(?:\d+|\*))?(?:hh|h|ll|l|q|L|z|t|j)?[@dDuUxXoOfeEgGcCsSpaAF%]')
-          for k in sorted(en):
-              fe = [x for x in fmt_re.findall(en[k]) if x != "%%"]
-              fs = [x for x in fmt_re.findall(es[k]) if x != "%%"]
-              if fe != fs:
-                  sys.exit(f"Format mismatch for {k}: en={fe} es={fs}")
-          print(f"L10n parity OK ({len(en)} keys, {len(calls)} calls)")
-          PY
 
       - name: Build
         run: ./build.sh

@@ -1,138 +1,29 @@
 import AppKit
 import Speech
+import SwiftUI
 import os
 
 @MainActor
 public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopoverDelegate {
-    public static var shared: AppDelegate {
-        NSApp.delegate as! AppDelegate
-    }
-
-    public static var sharedIfAvailable: AppDelegate? {
-        NSApp?.delegate as? AppDelegate
-    }
-
-    private struct SettingsSnapshot: Equatable {
-        var appLanguageCode: String
-        var isPinned: Bool
-        var isMicEnabled: Bool
-        var liveShareUseExternalTunnel: Bool
-        var mainLanguageCode: String
-        var foreignLanguageCode: String
-
-        static func current() -> SettingsSnapshot {
-            let s = AppSettings.shared
-            return SettingsSnapshot(
-                appLanguageCode: s.appLanguageCode,
-                isPinned: s.isPinned,
-                isMicEnabled: s.isMicEnabled,
-                liveShareUseExternalTunnel: s.liveShareUseExternalTunnel,
-                mainLanguageCode: s.mainLanguageCode,
-                foreignLanguageCode: s.foreignLanguageCode
-            )
-        }
-    }
-
-    @MainActor
-    private final class WeakOnboardingRef {
-        weak var controller: OnboardingWindowController?
-    }
-    
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
-    public var statusMenu: NSMenu!
-    
-    public private(set) var trayViewController: TrayCaptionViewController!
-    private var settingsWindowController: SettingsWindowController?
-    private var transcriptWindowController: TranscriptWindowController?
-    private var onboardingWindowController: OnboardingWindowController?
-    private var activeOnboardingToken: UUID?
-    private var pendingOnboardingCompletions: [UUID: [() -> Void]] = [:]
-    private var legalWindowController: LegalWindowController?
-    
-    private var autoHideWorkItem: DispatchWorkItem?
-    private var isAutoHiding: Bool = false
-    private var lastAutoHideScheduleTime: TimeInterval = 0
-    private var lastManualCloseTime: TimeInterval = 0
-    private var lastSettingsSnapshot: SettingsSnapshot?
-    public static let manualCloseCooldownSeconds: TimeInterval = 15.0
-    
-    private var showCaptionsMenuItem: NSMenuItem?
-    private var startListeningMenuItem: NSMenuItem?
-    private var micMenuItem: NSMenuItem?
-    private var liveShareMenuItem: NSMenuItem?
-    private var stopLiveShareMenuItem: NSMenuItem?
-    private var retryTunnelMenuItem: NSMenuItem?
-    private var foreignLangMenuItem: NSMenuItem?
-    private var mainLangMenuItem: NSMenuItem?
-    private var swapLangMenuItem: NSMenuItem?
-    private var appLangMenuItem: NSMenuItem?
+    private var statusMenu: NSMenu!
+
+    private var togglePopoverMenuItem: NSMenuItem?
     private var pauseResumeMenuItem: NSMenuItem?
-    private var transcriptMenuItem: NSMenuItem?
-    private var settingsMenuItem: NSMenuItem?
-    private var audioCheckMenuItem: NSMenuItem?
-    private var permissionsMenuItem: NSMenuItem?
-    private var quitMenuItem: NSMenuItem?
-    
+    private var conversationalMenuItem: NSMenuItem?
+    private var shareMenuItem: NSMenuItem?
+    private var lastAlertShown: String?
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        SupportedLanguages.refreshCacheInBackground { [weak self] in
-            self?.trayViewController?.refreshLanguageIndicatorsIfLoaded()
-        }
-        setupStandardMainMenu()
+        setupMainMenu()
         setupStatusItem()
-        CaptionCoordinator.shared.delegate = self
+        setupObservers()
 
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAppSettingsChanged),
-            name: AppSettings.didChangeNotification,
-            object: nil
-        )
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAppActivation),
-            name: NSApplication.didBecomeActiveNotification,
-            object: nil
-        )
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handlePauseStateChanged),
-            name: CaptionCoordinator.pauseStateDidChangeNotification,
-            object: nil
-        )
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleLiveShareStateChanged(_:)),
-            name: LiveShareManager.stateDidChangeNotification,
-            object: nil
-        )
-
-        let workspaceCenter = NSWorkspace.shared.notificationCenter
-        workspaceCenter.addObserver(self, selector: #selector(handleSystemWillSleep), name: NSWorkspace.willSleepNotification, object: nil)
-        workspaceCenter.addObserver(self, selector: #selector(handleSystemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
-        workspaceCenter.addObserver(self, selector: #selector(handleSystemWillSleep), name: NSWorkspace.screensDidSleepNotification, object: nil)
-        workspaceCenter.addObserver(self, selector: #selector(handleSystemDidWake), name: NSWorkspace.screensDidWakeNotification, object: nil)
-        workspaceCenter.addObserver(self, selector: #selector(handleSystemWillSleep), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
-        workspaceCenter.addObserver(self, selector: #selector(handleSystemDidWake), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
-
-        if !AppSettings.shared.hasCompletedOnboarding {
-            openOnboardingWindow { [weak self] in
-                self?.showTrayPopoverAction()
-            }
-        } else {
-            startEnginesWithAuthorization()
-        }
-    }
-
-    private func startEnginesWithAuthorization() {
-        let status = SFSpeechRecognizer.authorizationStatus()
-        if status == .notDetermined {
-            SpeechRecognitionManager.requestAuthorization { granted in
-                AppLog.app.info("Speech recognition authorization status: \(granted)")
+        let auth = SFSpeechRecognizer.authorizationStatus()
+        if auth == .notDetermined {
+            SpeechRecognitionManager.requestAuthorization { _ in
                 Task { @MainActor in
                     CaptionCoordinator.shared.start()
                     self.updateStatusItemAppearance()
@@ -143,896 +34,215 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             updateStatusItemAppearance()
         }
     }
-    
-    private func buildAppLanguageSubmenu() -> NSMenu {
-        let submenu = NSMenu(title: L10n.tr("menu.appLanguage", "App Language"))
-        let currentCode = AppSettings.shared.appLanguageCode
-        for lang in AppSettings.supportedAppLanguages {
-            let item = NSMenuItem(
-                title: "\(lang.flag)  \(lang.name)",
-                action: #selector(selectAppLanguageAction(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = lang.code
-            item.state = (currentCode == lang.code) ? .on : .off
-            submenu.addItem(item)
-        }
-        return submenu
+
+    public func applicationWillTerminate(_ notification: Notification) {
+        CaptionCoordinator.shared.stop()
+        LiveShareManager.shared.stopSharingSynchronously()
     }
 
-    @objc private func selectAppLanguageAction(_ sender: NSMenuItem) {
-        guard let code = sender.representedObject as? String else { return }
-        AppSettings.shared.appLanguageCode = code
+    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showPopover()
+        return false
     }
 
-    private func setupStandardMainMenu() {
+    private func setupMainMenu() {
         let mainMenu = NSMenu()
-        
-        let appMenuItem = NSMenuItem()
+        let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: L10n.tr("menu.about", "About Call Caption"), action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-        appMenu.addItem(NSMenuItem.separator())
-        let settingsItem = NSMenuItem(title: L10n.tr("menu.settings", "Settings…"), action: #selector(openSettingsMenuAction), keyEquivalent: ",")
-        settingsItem.target = self
-        appMenu.addItem(settingsItem)
-        let appLangItem = NSMenuItem(title: L10n.tr("menu.appLanguage", "App Language"), action: nil, keyEquivalent: "")
-        appLangItem.submenu = buildAppLanguageSubmenu()
-        appMenu.addItem(appLangItem)
-        appMenu.addItem(NSMenuItem.separator())
-        let privacyItem = NSMenuItem(title: L10n.tr("legal.privacyPolicy", "Privacy Policy"), action: #selector(openPrivacyMenuAction), keyEquivalent: "")
-        privacyItem.target = self
-        appMenu.addItem(privacyItem)
-        let termsItem = NSMenuItem(title: L10n.tr("legal.termsOfUse", "Terms of Use"), action: #selector(openTermsMenuAction), keyEquivalent: "")
-        termsItem.target = self
-        appMenu.addItem(termsItem)
-        appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: L10n.tr("menu.hide", "Hide Call Caption"), action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        let hideOthersItem = NSMenuItem(title: L10n.tr("menu.hideOthers", "Hide Others"), action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
-        hideOthersItem.keyEquivalentModifierMask = [.command, .option]
-        appMenu.addItem(hideOthersItem)
-        appMenu.addItem(withTitle: L10n.tr("menu.showAll", "Show All"), action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
-        appMenu.addItem(NSMenuItem.separator())
-        let quitItem = NSMenuItem(title: L10n.tr("menu.quit", "Quit Call Caption"), action: #selector(quitApp), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit Call Caption", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         appMenu.addItem(quitItem)
-        appMenuItem.submenu = appMenu
-        mainMenu.addItem(appMenuItem)
-        
-        let editMenuItem = NSMenuItem()
-        let editMenu = NSMenu(title: L10n.tr("menu.edit", "Edit"))
-        editMenu.addItem(withTitle: L10n.tr("menu.undo", "Undo"), action: Selector(("undo:")), keyEquivalent: "z")
-        editMenu.addItem(withTitle: L10n.tr("menu.redo", "Redo"), action: Selector(("redo:")), keyEquivalent: "Z")
-        editMenu.addItem(NSMenuItem.separator())
-        editMenu.addItem(withTitle: L10n.tr("menu.cut", "Cut"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: L10n.tr("menu.copy", "Copy"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: L10n.tr("menu.paste", "Paste"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: L10n.tr("menu.selectAll", "Select All"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editMenuItem.submenu = editMenu
-        mainMenu.addItem(editMenuItem)
-        
-        let windowMenuItem = NSMenuItem()
-        let windowMenu = NSMenu(title: L10n.tr("menu.window", "Window"))
-        windowMenu.addItem(withTitle: L10n.tr("menu.closeWindow", "Close Window"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        windowMenu.addItem(withTitle: L10n.tr("menu.minimize", "Minimize"), action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-        windowMenu.addItem(withTitle: L10n.tr("menu.zoom", "Zoom"), action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
-        windowMenu.addItem(NSMenuItem.separator())
-        let transcriptItem = NSMenuItem(title: L10n.tr("menu.transcript", "Transcript…"), action: #selector(openTranscriptWindow), keyEquivalent: "t")
-        transcriptItem.target = self
-        windowMenu.addItem(transcriptItem)
-        let audioCheckWinItem = NSMenuItem(title: L10n.tr("menu.audioCheck", "Audio Check & Calibration…"), action: #selector(openAudioCalibration), keyEquivalent: "")
-        audioCheckWinItem.target = self
-        windowMenu.addItem(audioCheckWinItem)
-        let permItem = NSMenuItem(title: L10n.tr("menu.permissions", "Permissions…"), action: #selector(openPermissions), keyEquivalent: "")
-        permItem.target = self
-        windowMenu.addItem(permItem)
-        let guideItem = NSMenuItem(title: L10n.tr("menu.setupGuide", "Setup Guide…"), action: #selector(openOnboardingMenuAction), keyEquivalent: "")
-        guideItem.target = self
-        windowMenu.addItem(guideItem)
-        windowMenu.addItem(NSMenuItem.separator())
-        windowMenu.addItem(withTitle: L10n.tr("menu.bringAllToFront", "Bring All to Front"), action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
-        windowMenuItem.submenu = windowMenu
-        mainMenu.addItem(windowMenuItem)
-        
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
         NSApp.mainMenu = mainMenu
     }
-    
+
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
         if let button = statusItem.button {
-            if let image = NSImage(systemSymbolName: "captions.bubble.fill", accessibilityDescription: "Call Caption") {
-                let config = NSImage.SymbolConfiguration(pointSize: 13.5, weight: .regular)
-                button.image = image.withSymbolConfiguration(config)
-                button.imagePosition = .imageOnly
-            } else {
-                button.title = "CC"
-            }
             button.toolTip = "Call Caption"
-            button.setAccessibilityLabel("Call Caption")
-            button.action = #selector(togglePopover(_:))
             button.target = self
+            button.action = #selector(handleStatusItemClick(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        
-        trayViewController = TrayCaptionViewController()
-        trayViewController.loadViewIfNeeded()
-        
+
+        let hosting = NSHostingController(
+            rootView: CaptionPopoverView(
+                viewModel: CaptionCoordinator.shared.viewModel,
+                onQuit: { [weak self] in self?.quitApp() }
+            )
+        )
         popover = NSPopover()
         popover.delegate = self
-        popover.contentViewController = trayViewController
-        updatePopoverBehavior()
+        popover.contentViewController = hosting
         popover.appearance = NSAppearance(named: .darkAqua)
-        
+        updatePopoverBehavior()
+
         setupStatusMenu()
         updateStatusItemAppearance()
-        lastSettingsSnapshot = SettingsSnapshot.current()
+    }
+
+    private func setupStatusMenu() {
+        statusMenu = NSMenu()
+        statusMenu.delegate = self
+
+        let showItem = NSMenuItem(title: "Show Captions", action: #selector(togglePopoverAction), keyEquivalent: "")
+        showItem.target = self
+        statusMenu.addItem(showItem)
+        togglePopoverMenuItem = showItem
+
+        let pauseItem = NSMenuItem(title: "Pause Captions", action: #selector(togglePauseAction), keyEquivalent: "")
+        pauseItem.target = self
+        statusMenu.addItem(pauseItem)
+        pauseResumeMenuItem = pauseItem
+
+        let convItem = NSMenuItem(title: "Conversational Mode", action: #selector(toggleConversationalAction), keyEquivalent: "")
+        convItem.target = self
+        statusMenu.addItem(convItem)
+        conversationalMenuItem = convItem
+
+        let shareItem = NSMenuItem(title: "Share Live Link", action: #selector(toggleShareAction), keyEquivalent: "")
+        shareItem.target = self
+        statusMenu.addItem(shareItem)
+        shareMenuItem = shareItem
+
+        statusMenu.addItem(NSMenuItem.separator())
+
+        let quitItem = NSMenuItem(title: "Quit Call Caption", action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.target = self
+        statusMenu.addItem(quitItem)
+    }
+
+    private func setupObservers() {
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(handleStateDidChange), name: CaptionCoordinator.pauseStateDidChangeNotification, object: nil)
+        center.addObserver(self, selector: #selector(handlePinStateDidChange), name: CaptionCoordinator.pinStateDidChangeNotification, object: nil)
+        center.addObserver(self, selector: #selector(handleStateDidChange), name: LiveShareManager.stateDidChangeNotification, object: nil)
+        center.addObserver(self, selector: #selector(handleAppActivation), name: NSApplication.didBecomeActiveNotification, object: nil)
+
+        let ws = NSWorkspace.shared.notificationCenter
+        ws.addObserver(self, selector: #selector(handleSystemWillSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        ws.addObserver(self, selector: #selector(handleSystemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
+        ws.addObserver(self, selector: #selector(handleSystemWillSleep), name: NSWorkspace.screensDidSleepNotification, object: nil)
+        ws.addObserver(self, selector: #selector(handleSystemDidWake), name: NSWorkspace.screensDidWakeNotification, object: nil)
+        ws.addObserver(self, selector: #selector(handleSystemWillSleep), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
+        ws.addObserver(self, selector: #selector(handleSystemDidWake), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
+    }
+
+    private func updatePopoverBehavior() {
+        popover?.behavior = CaptionCoordinator.shared.isPinned ? .applicationDefined : .transient
     }
 
     private func updateStatusItemAppearance() {
         guard let button = statusItem?.button else { return }
         let isSharing = LiveShareManager.shared.isSharing
-        let isPaused = CaptionCoordinator.shared.isPaused || !CaptionCoordinator.shared.hasStarted
+        let isPaused = CaptionCoordinator.shared.isPaused
+
         let symbol: String
         let description: String
         if isSharing {
             symbol = "dot.radiowaves.left.and.right"
-            description = L10n.tr("status.tooltip.liveShare", "Call Caption — Live Link active")
+            description = "Call Caption — Live Link active"
         } else if isPaused {
             symbol = "captions.bubble"
-            description = L10n.tr("status.tooltip.paused", "Call Caption — paused")
+            description = "Call Caption — Paused"
         } else {
             symbol = "captions.bubble.fill"
-            description = L10n.tr("status.tooltip.listening", "Call Caption — listening")
+            description = "Call Caption — Listening"
         }
-        let config = NSImage.SymbolConfiguration(pointSize: 13.5, weight: .regular)
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
+
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13.5, weight: .regular)
+        let img = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
             ?? NSImage(systemSymbolName: "captions.bubble.fill", accessibilityDescription: description)
-        button.image = image?.withSymbolConfiguration(config)
+        button.image = img?.withSymbolConfiguration(cfg)
         button.toolTip = description
         button.setAccessibilityLabel(description)
     }
 
-    @objc private func handleLiveShareStateChanged(_ notification: Notification) {
-        updateStatusItemAppearance()
-        updateMenuItemsState()
-    }
-
-    @objc private func handleAppSettingsChanged() {
-        let next = SettingsSnapshot.current()
-        let prev = lastSettingsSnapshot
-        lastSettingsSnapshot = next
-
-        let appLangChanged = (prev?.appLanguageCode != next.appLanguageCode)
-        let pinnedChanged = (prev?.isPinned != next.isPinned)
-        let menuRelevantChanged = (
-            prev == nil ||
-            appLangChanged ||
-            prev?.isMicEnabled != next.isMicEnabled ||
-            prev?.liveShareUseExternalTunnel != next.liveShareUseExternalTunnel ||
-            prev?.mainLanguageCode != next.mainLanguageCode ||
-            prev?.foreignLanguageCode != next.foreignLanguageCode
-        )
-
-        if appLangChanged {
-            setupStandardMainMenu()
-            updateStatusItemAppearance()
-        }
-        if menuRelevantChanged {
-            updateMenuItemsState()
-        }
-        if pinnedChanged {
-            updatePopoverBehavior()
-        }
-    }
-
-    private func updatePopoverBehavior() {
-        guard popover != nil else { return }
-        popover.behavior = AppSettings.shared.isPinned ? .applicationDefined : .transient
-    }
-
-    public func setPopoverModalConfirmationActive(_ active: Bool) {
-        if active {
-            autoHideWorkItem?.cancel()
-            autoHideWorkItem = nil
-            popover?.behavior = .applicationDefined
-        } else {
-            updatePopoverBehavior()
-        }
-    }
-    
-    private func setupStatusMenu() {
-        statusMenu = NSMenu()
-        statusMenu.delegate = self
-        
-        let showItem = NSMenuItem(title: L10n.tr("menu.showCaptions", "Show Captions"), action: #selector(showTrayPopoverAction), keyEquivalent: "c")
-        showItem.target = self
-        statusMenu.addItem(showItem)
-        self.showCaptionsMenuItem = showItem
-
-        let startItem = NSMenuItem(title: L10n.tr("menu.startListening", "Start Listening"), action: #selector(ensureListeningAction), keyEquivalent: "")
-        startItem.target = self
-        statusMenu.addItem(startItem)
-        self.startListeningMenuItem = startItem
-
-        let pauseItem = NSMenuItem(title: L10n.tr("header.pause", "Pause"), action: #selector(togglePauseResumeAction), keyEquivalent: "p")
-        pauseItem.target = self
-        statusMenu.addItem(pauseItem)
-        self.pauseResumeMenuItem = pauseItem
-        
-        statusMenu.addItem(NSMenuItem.separator())
-        
-        let micItem = NSMenuItem(title: L10n.tr("header.microphone", "Microphone"), action: #selector(toggleMicAction), keyEquivalent: "m")
-        micItem.target = self
-        micItem.state = AppSettings.shared.isMicEnabled ? .on : .off
-        statusMenu.addItem(micItem)
-        self.micMenuItem = micItem
-        
-        let liveItem = NSMenuItem(title: L10n.tr("menu.shareLiveLink", "Share Live Link…"), action: #selector(shareLiveCaptionsLinkAction), keyEquivalent: "l")
-        liveItem.target = self
-        statusMenu.addItem(liveItem)
-        self.liveShareMenuItem = liveItem
-
-        let stopLiveItem = NSMenuItem(title: L10n.tr("menu.stopLiveLink", "Stop Live Link"), action: #selector(stopLiveCaptionsLinkAction), keyEquivalent: "")
-        stopLiveItem.target = self
-        statusMenu.addItem(stopLiveItem)
-        self.stopLiveShareMenuItem = stopLiveItem
-
-        let retryTunnelItem = NSMenuItem(title: L10n.tr("menu.retryPublicTunnel", "Retry Public Tunnel"), action: #selector(retryLiveTunnelAction), keyEquivalent: "")
-        retryTunnelItem.target = self
-        statusMenu.addItem(retryTunnelItem)
-        self.retryTunnelMenuItem = retryTunnelItem
-
-        statusMenu.addItem(NSMenuItem.separator())
-        
-        let foreignItem = NSMenuItem(title: "", action: #selector(openSettingsMenuAction), keyEquivalent: "")
-        foreignItem.target = self
-        statusMenu.addItem(foreignItem)
-        self.foreignLangMenuItem = foreignItem
-        
-        let mainItem = NSMenuItem(title: "", action: #selector(openSettingsMenuAction), keyEquivalent: "")
-        mainItem.target = self
-        statusMenu.addItem(mainItem)
-        self.mainLangMenuItem = mainItem
-        
-        let swapItem = NSMenuItem(title: L10n.tr("header.swapLanguages", "Swap Languages"), action: #selector(swapLanguagesMenuAction), keyEquivalent: "s")
-        swapItem.target = self
-        statusMenu.addItem(swapItem)
-        self.swapLangMenuItem = swapItem
-
-        let appLangItem = NSMenuItem(title: L10n.tr("menu.appLanguage", "App Language"), action: nil, keyEquivalent: "")
-        appLangItem.submenu = buildAppLanguageSubmenu()
-        statusMenu.addItem(appLangItem)
-        self.appLangMenuItem = appLangItem
-        
-        statusMenu.addItem(NSMenuItem.separator())
-        
-        let transcriptItem = NSMenuItem(title: L10n.tr("menu.transcript", "Transcript…"), action: #selector(openTranscriptWindow), keyEquivalent: "t")
-        transcriptItem.target = self
-        statusMenu.addItem(transcriptItem)
-        self.transcriptMenuItem = transcriptItem
-        
-        let settingsItem = NSMenuItem(title: L10n.tr("menu.settings", "Settings…"), action: #selector(openSettingsMenuAction), keyEquivalent: ",")
-        settingsItem.target = self
-        statusMenu.addItem(settingsItem)
-        self.settingsMenuItem = settingsItem
-
-        let audioCheckItem = NSMenuItem(title: L10n.tr("menu.audioCheck", "Audio Check & Calibration…"), action: #selector(openAudioCalibration), keyEquivalent: "")
-        audioCheckItem.target = self
-        statusMenu.addItem(audioCheckItem)
-        self.audioCheckMenuItem = audioCheckItem
-        
-        let permissionsItem = NSMenuItem(title: L10n.tr("menu.permissions", "Permissions…"), action: #selector(openPermissions), keyEquivalent: "")
-        permissionsItem.target = self
-        statusMenu.addItem(permissionsItem)
-        self.permissionsMenuItem = permissionsItem
-        
-        statusMenu.addItem(NSMenuItem.separator())
-        
-        let quitItem = NSMenuItem(title: L10n.tr("menu.quit", "Quit Call Caption"), action: #selector(quitApp), keyEquivalent: "q")
-        quitItem.target = self
-        statusMenu.addItem(quitItem)
-        self.quitMenuItem = quitItem
-
-        updateMenuItemsState()
-    }
-    
-    public func menuWillOpen(_ menu: NSMenu) {
-        updateMenuItemsState()
-    }
-    
     public func menuNeedsUpdate(_ menu: NSMenu) {
-        updateMenuItemsState()
-    }
-    
-    private func updateMenuItemsState() {
-        updatePauseResumeMenuItem()
-        
-        showCaptionsMenuItem?.title = L10n.tr("menu.showCaptions", "Show Captions")
-        startListeningMenuItem?.title = L10n.tr("menu.startListening", "Start Listening")
-        micMenuItem?.title = L10n.tr("header.microphone", "Microphone")
-        micMenuItem?.state = AppSettings.shared.isMicEnabled ? .on : .off
-        liveShareMenuItem?.title = LiveShareManager.shared.isSharing
-            ? L10n.tr("menu.showLiveLink", "Show Live Link")
-            : L10n.tr("menu.shareLiveLink", "Share Live Link…")
-        stopLiveShareMenuItem?.title = L10n.tr("menu.stopLiveLink", "Stop Live Link")
-        stopLiveShareMenuItem?.isEnabled = LiveShareManager.shared.isSharing
-        retryTunnelMenuItem?.title = L10n.tr("menu.retryPublicTunnel", "Retry Public Tunnel")
-        retryTunnelMenuItem?.isEnabled = LiveShareManager.shared.isSharing
-            && AppSettings.shared.liveShareUseExternalTunnel
-            && LiveShareManager.shared.publicShareURL == nil
-        
-        let main = AppSettings.shared.mainLanguageItem
-        let foreign = AppSettings.shared.foreignLanguageItem
-        let callerPrefix = L10n.tr("menu.callerPrefix", "Caller")
-        let youPrefix = L10n.tr("menu.youPrefix", "You")
-        foreignLangMenuItem?.title = "\(callerPrefix): \(foreign.flag) \(foreign.localizedName)"
-        mainLangMenuItem?.title = "\(youPrefix): \(main.flag) \(main.localizedName)"
-        swapLangMenuItem?.title = L10n.tr("header.swapLanguages", "Swap Languages")
-
-        appLangMenuItem?.title = L10n.tr("menu.appLanguage", "App Language")
-        let currentAppLang = AppSettings.shared.appLanguageCode
-        appLangMenuItem?.submenu?.title = L10n.tr("menu.appLanguage", "App Language")
-        for subItem in appLangMenuItem?.submenu?.items ?? [] {
-            let code = subItem.representedObject as? String
-            subItem.state = (code == currentAppLang) ? .on : .off
-        }
-
-        transcriptMenuItem?.title = L10n.tr("menu.transcript", "Transcript…")
-        settingsMenuItem?.title = L10n.tr("menu.settings", "Settings…")
-        audioCheckMenuItem?.title = L10n.tr("menu.audioCheck", "Audio Check & Calibration…")
-        permissionsMenuItem?.title = L10n.tr("menu.permissions", "Permissions…")
-        quitMenuItem?.title = L10n.tr("menu.quit", "Quit Call Caption")
-    }
-    
-    private func updatePauseResumeMenuItem() {
-        let isPaused = CaptionCoordinator.shared.isPaused
-        pauseResumeMenuItem?.title = isPaused ? L10n.tr("header.resume", "Resume") : L10n.tr("header.pause", "Pause")
-        if let icon = NSImage(systemSymbolName: isPaused ? "play.fill" : "pause.fill", accessibilityDescription: nil) {
-            let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-            pauseResumeMenuItem?.image = icon.withSymbolConfiguration(config)
-        }
-    }
-    
-    @objc public func togglePauseResumeAction() {
-        CaptionCoordinator.shared.togglePauseResume()
-    }
-    
-    @objc private func swapLanguagesMenuAction() {
-        clearSystemAlertBanner()
-        AppSettings.shared.swapLanguages()
-    }
-    
-    @objc public func toggleMicAction() {
-        if AppSettings.shared.isMicEnabled {
-            AppSettings.shared.isMicEnabled = false
-            updateMenuItemsState()
-        } else {
-            if PermissionHelper.shared.hasMicrophoneAccess {
-                AppSettings.shared.isMicEnabled = true
-                updateMenuItemsState()
-            } else {
-                PermissionHelper.shared.requestMicrophoneAccess { [weak self] granted in
-                    if granted {
-                        AppSettings.shared.isMicEnabled = true
-                        self?.clearSystemAlertBanner()
-                    } else {
-                        AppSettings.shared.isMicEnabled = false
-                        self?.showSystemAlertBanner(
-                            message: L10n.tr("tray.micRequired", "Microphone access required"),
-                            actionType: .permissions
-                        )
-                    }
-                    self?.updateMenuItemsState()
-                }
-            }
-        }
-    }
-    
-    @objc public func shareLiveCaptionsLinkAction() {
-        if LiveShareManager.shared.isSharing {
-            showTrayPopoverAction()
-            trayViewController?.showLiveShareBanner()
-        } else {
-            confirmAndStartLiveShare()
-        }
+        togglePopoverMenuItem?.title = popover.isShown ? "Hide Captions" : "Show Captions"
+        pauseResumeMenuItem?.title = CaptionCoordinator.shared.isPaused ? "Resume Captions" : "Pause Captions"
+        conversationalMenuItem?.state = CaptionCoordinator.shared.isConversationalMode ? .on : .off
+        shareMenuItem?.title = LiveShareManager.shared.isSharing ? "Stop Sharing Link" : "Share Live Link"
     }
 
-    @objc public func stopLiveCaptionsLinkAction() {
-        LiveShareManager.shared.stopSharing()
-        trayViewController?.hideLiveShareBanner()
-        updateMenuItemsState()
-    }
-
-    @objc public func retryLiveTunnelAction() {
-        LiveShareManager.shared.retryTunnel()
-        showTrayPopoverAction()
-        trayViewController?.showLiveShareBanner()
-    }
-
-    public func confirmAndStartLiveShare() {
-        let externalTunnel = AppSettings.shared.liveShareUseExternalTunnel
-        if externalTunnel {
-            guard requestExternalLiveShareConsentIfNeeded() else { return }
-        } else if !AppSettings.shared.hasAcceptedLiveShareConsent {
-            let alert = NSAlert()
-            alert.messageText = L10n.tr("liveshare.localConsent.title", "Start Local Live Link?")
-            alert.informativeText = L10n.tr(
-                "liveshare.localConsent.message",
-                "Local-only mode keeps captions on this Mac or your local network. No external tunnel is opened.\n\nEnsure all call participants have consented to caption sharing where required by law."
-            )
-            alert.alertStyle = .informational
-            alert.showsSuppressionButton = true
-            alert.suppressionButton?.title = L10n.tr("liveshare.dontAskAgain", "Don't ask again")
-            alert.addButton(withTitle: L10n.tr("liveshare.consent.confirm", "Start Live Link"))
-            alert.addButton(withTitle: L10n.tr("common.cancel", "Cancel"))
-            NSApp.activate(ignoringOtherApps: true)
-            let response = alert.runModal()
-            guard response == .alertFirstButtonReturn else { return }
-            if alert.suppressionButton?.state == .on {
-                AppSettings.shared.hasAcceptedLiveShareConsent = true
-            }
-        }
-
-        CaptionCoordinator.shared.prepareForLiveShareStart()
-        LiveShareManager.shared.startSharing()
-        LiveShareManager.shared.broadcastPauseState(CaptionCoordinator.shared.isPaused)
-        showTrayPopoverAction()
-        trayViewController?.showLiveShareBanner()
-    }
-
-    private func makeExternalLiveShareConsentAlert() -> NSAlert {
-        let alert = NSAlert()
-        alert.messageText = L10n.tr("liveshare.consent.title", "Start External Live Link?")
-        alert.informativeText = L10n.tr(
-            "liveshare.consent.message",
-            "Live Link streams captions through a public tunnel (localhost.run) to anyone with your link. Captions are encrypted end-to-end.\n\nMake sure call participants consent to caption sharing where required."
-        )
-        alert.alertStyle = .informational
-        alert.showsSuppressionButton = true
-        alert.suppressionButton?.title = L10n.tr("liveshare.dontAskAgain", "Don't ask again")
-        alert.addButton(withTitle: L10n.tr("liveshare.consent.confirm", "Start Live Link"))
-        alert.addButton(withTitle: L10n.tr("common.cancel", "Cancel"))
-        return alert
-    }
-
-    public func requestExternalLiveShareConsentIfNeeded() -> Bool {
-        if AppSettings.shared.hasAcceptedExternalLiveShareConsent { return true }
-        let alert = makeExternalLiveShareConsentAlert()
-        NSApp.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else { return false }
-        if alert.suppressionButton?.state == .on {
-            AppSettings.shared.hasAcceptedExternalLiveShareConsent = true
-        }
-        return true
-    }
-
-    public func requestExternalLiveShareConsentIfNeeded(
-        sheetFor hostWindow: NSWindow?,
-        completion: @escaping @Sendable @MainActor (Bool) -> Void
-    ) {
-        if AppSettings.shared.hasAcceptedExternalLiveShareConsent {
-            completion(true)
-            return
-        }
-        guard let hostWindow else {
-            completion(requestExternalLiveShareConsentIfNeeded())
-            return
-        }
-        let alert = makeExternalLiveShareConsentAlert()
-        NSApp.activate(ignoringOtherApps: true)
-        alert.beginSheetModal(for: hostWindow) { response in
-            Task { @MainActor in
-                guard response == .alertFirstButtonReturn else {
-                    completion(false)
-                    return
-                }
-                if alert.suppressionButton?.state == .on {
-                    AppSettings.shared.hasAcceptedExternalLiveShareConsent = true
-                }
-                completion(true)
-            }
-        }
-    }
-
-    @discardableResult
-    private func presentPopoverIfPossible() -> Bool {
-        guard let pop = popover,
-              !pop.isShown,
-              let button = statusItem?.button,
-              button.window != nil else {
-            return false
-        }
-        autoHideWorkItem?.cancel()
-        autoHideWorkItem = nil
-        isAutoHiding = false
-        updatePopoverBehavior()
-        pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        return true
-    }
-
-    public func popoverDidClose(_ notification: Notification) {
-        autoHideWorkItem?.cancel()
-        autoHideWorkItem = nil
-        if !isAutoHiding {
-            lastManualCloseTime = ProcessInfo.processInfo.systemUptime
-        }
-        isAutoHiding = false
-    }
-
-    @objc public func togglePopover(_ sender: AnyObject?) {
-        if NSApp.currentEvent?.type == .rightMouseUp {
-            updateMenuItemsState()
+    @objc private func handleStatusItemClick(_ sender: Any?) {
+        if let event = NSApp.currentEvent,
+           event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
             statusItem.menu = statusMenu
             statusItem.button?.performClick(nil)
             statusItem.menu = nil
-        } else {
-            if popover?.isShown == true {
-                closeTrayPopover(sender: sender)
-            } else {
-                _ = presentPopoverIfPossible()
-            }
-        }
-    }
-    
-    @objc public func showTrayPopoverAction() {
-        _ = presentPopoverIfPossible()
-    }
-    
-    public func closeTrayPopover() {
-        closeTrayPopover(sender: nil)
-    }
-
-    private func closeTrayPopover(sender: AnyObject?) {
-        autoHideWorkItem?.cancel()
-        autoHideWorkItem = nil
-        guard let pop = popover, pop.isShown else { return }
-        isAutoHiding = false
-        lastManualCloseTime = ProcessInfo.processInfo.systemUptime
-        pop.performClose(sender)
-    }
-
-    public static func shouldAutoOpenPopover(
-        isPopoverShown: Bool,
-        autoPopupSetting: Bool,
-        speaker: String,
-        nowUptime: TimeInterval,
-        lastManualCloseUptime: TimeInterval
-    ) -> Bool {
-        guard !isPopoverShown, autoPopupSetting else { return false }
-        guard speaker.caseInsensitiveCompare("caller") == .orderedSame else { return false }
-        if lastManualCloseUptime > 0 && (nowUptime - lastManualCloseUptime) < manualCloseCooldownSeconds {
-            return false
-        }
-        return true
-    }
-    
-    
-    private var lastAlertShownMessage: String?
-
-    private static func normalizedAlertKey(_ message: String) -> String {
-        if let idx = message.range(of: "… ")?.lowerBound {
-            return String(message[..<idx])
-        }
-        if let idx = message.range(of: " (")?.lowerBound, message.hasSuffix("%)") {
-            return String(message[..<idx])
-        }
-        return message
-    }
-    
-    public func showSystemAlertBanner(message: String, actionType: SystemAlertActionType) {
-        trayViewController?.showAlertBanner(message: message, actionType: actionType)
-        let key = Self.normalizedAlertKey(message)
-        if lastAlertShownMessage != key {
-            lastAlertShownMessage = key
-            _ = presentPopoverIfPossible()
-        }
-    }
-    
-    private var isSessionResigned = false
-
-    public func clearSystemAlertBanner(dismissInCoordinator: Bool = true) {
-        if dismissInCoordinator {
-            CaptionCoordinator.shared.dismissPresentedAlert()
-        }
-        lastAlertShownMessage = nil
-        trayViewController?.clearAlertBanner()
-    }
-    
-    
-    public func handleSpeechReceived(
-        utteranceID: UUID,
-        speaker: String,
-        original: String,
-        translated: String,
-        sourceLangCode: String,
-        targetLangCode: String,
-        isFinal: Bool,
-        isUntranslated: Bool = false
-    ) {
-        trayViewController.updateCaption(
-            utteranceID: utteranceID,
-            speaker: speaker,
-            translated: translated,
-            original: original,
-            sourceLangCode: sourceLangCode,
-            targetLangCode: targetLangCode,
-            isFinal: isFinal,
-            isUntranslated: isUntranslated
-        )
-        
-        let now = ProcessInfo.processInfo.systemUptime
-        if Self.shouldAutoOpenPopover(
-            isPopoverShown: popover.isShown,
-            autoPopupSetting: AppSettings.shared.autoPopupOnForeignSpeech,
-            speaker: speaker,
-            nowUptime: now,
-            lastManualCloseUptime: lastManualCloseTime
-        ) {
-            _ = presentPopoverIfPossible()
-        }
-
-        guard popover?.isShown == true else {
-            autoHideWorkItem?.cancel()
-            autoHideWorkItem = nil
             return
         }
-        
-        guard isFinal || (now - lastAutoHideScheduleTime) >= 0.5 else { return }
-        lastAutoHideScheduleTime = now
-        
-        autoHideWorkItem?.cancel()
-        autoHideWorkItem = nil
-        let delay = AppSettings.shared.autoHideDelay
-        if delay > 0 {
-            let item = DispatchWorkItem { [weak self] in
-                guard let self = self else { return }
-                self.autoHideWorkItem = nil
-                if !AppSettings.shared.isPinned && self.popover.isShown {
-                    self.isAutoHiding = true
-                    self.popover.performClose(nil)
-                }
-            }
-            autoHideWorkItem = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        togglePopoverAction()
+    }
+
+    @objc private func togglePopoverAction() {
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            showPopover()
         }
     }
-    
 
-    @objc private func handleAppActivation(_ notification: Notification) {
+    private func showPopover() {
+        guard let button = statusItem?.button else { return }
+        if !popover.isShown {
+            updatePopoverBehavior()
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    @objc private func togglePauseAction() {
+        CaptionCoordinator.shared.togglePauseResume()
+    }
+
+    @objc private func toggleConversationalAction() {
+        CaptionCoordinator.shared.setConversationalMode(!CaptionCoordinator.shared.isConversationalMode)
+    }
+
+    @objc private func toggleShareAction() {
+        CaptionCoordinator.shared.toggleSharing()
+        if LiveShareManager.shared.isSharing {
+            showPopover()
+        }
+    }
+
+    @objc private func handleStateDidChange() {
+        updateStatusItemAppearance()
+        if let msg = CaptionCoordinator.shared.viewModel.alertMessage, msg != lastAlertShown {
+            lastAlertShown = msg
+            showPopover()
+        }
+    }
+
+    @objc private func handlePinStateDidChange() {
+        updatePopoverBehavior()
+    }
+
+    @objc private func handleAppActivation() {
         CaptionCoordinator.shared.recoverEnginesIfNeeded()
     }
 
-    @objc private func handleSystemWillSleep(_ notification: Notification) {
-        if notification.name == NSWorkspace.sessionDidResignActiveNotification {
-            isSessionResigned = true
-        }
-        guard AppSettings.shared.pauseOnScreenLock else { return }
+    @objc private func handleSystemWillSleep() {
         CaptionCoordinator.shared.autoPauseForSystem()
     }
 
-    @objc private func handleSystemDidWake(_ notification: Notification) {
-        if notification.name == NSWorkspace.sessionDidBecomeActiveNotification {
-            isSessionResigned = false
-        }
-        guard !isSessionResigned else { return }
-        if let dict = CGSessionCopyCurrentDictionary() as? [String: Any],
-           (dict["CGSSessionScreenIsLocked"] as? Bool) == true {
-            return
-        }
-        if AppSettings.shared.pauseOnScreenLock {
-            CaptionCoordinator.shared.autoResumeAfterSystem()
-        }
-        CaptionCoordinator.shared.recoverEnginesIfNeeded()
+    @objc private func handleSystemDidWake() {
+        CaptionCoordinator.shared.autoResumeAfterSystem()
     }
 
-    @objc private func handlePauseStateChanged(_ notification: Notification) {
-        LiveShareManager.shared.broadcastPauseState(CaptionCoordinator.shared.isPaused)
-        updateStatusItemAppearance()
-        updateMenuItemsState()
-    }
-
-    @objc public func ensureListeningAction() {
-        guard AppSettings.shared.hasCompletedOnboarding else {
-            openOnboardingWindow()
-            return
-        }
-        if !CaptionCoordinator.shared.hasStarted {
-            startEnginesWithAuthorization()
-        } else if CaptionCoordinator.shared.isPaused {
-            CaptionCoordinator.shared.resume()
-        } else {
-            CaptionCoordinator.shared.recoverEnginesIfNeeded()
-        }
-        showTrayPopoverAction()
-    }
-
-    
-    @objc private func openSettingsMenuAction() {
-        openSettingsWindow(selectedTab: nil)
-    }
-
-    @objc private func openOnboardingMenuAction() {
-        openOnboardingWindow()
-    }
-
-    public func openOnboardingWindow(onComplete: (() -> Void)? = nil) {
-        closeTrayPopover()
-        if let existing = onboardingWindowController, existing.window?.isVisible == true {
-            if let onComplete, let token = activeOnboardingToken {
-                pendingOnboardingCompletions[token, default: []].append(onComplete)
-            }
-            existing.refreshState()
-            existing.showWindow(nil)
-            existing.window?.makeKeyAndOrderFront(nil)
-            existing.window?.orderFrontRegardless()
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let token = UUID()
-        activeOnboardingToken = token
-        if let onComplete {
-            pendingOnboardingCompletions[token] = [onComplete]
-        }
-
-        let ref = WeakOnboardingRef()
-        let controller = OnboardingWindowController(
-            onComplete: { [weak self] in
-                guard let self = self else { return }
-                if !CaptionCoordinator.shared.hasStarted {
-                    self.startEnginesWithAuthorization()
-                }
-                let callbacks = self.pendingOnboardingCompletions.removeValue(forKey: token) ?? []
-                for callback in callbacks {
-                    callback()
-                }
-                if let created = ref.controller, self.onboardingWindowController === created {
-                    self.onboardingWindowController = nil
-                }
-                if self.activeOnboardingToken == token {
-                    self.activeOnboardingToken = nil
-                }
-            },
-            onClose: { [weak self] in
-                guard let self = self else { return }
-                self.pendingOnboardingCompletions.removeValue(forKey: token)
-                if let created = ref.controller, self.onboardingWindowController === created {
-                    self.onboardingWindowController = nil
-                }
-                if self.activeOnboardingToken == token {
-                    self.activeOnboardingToken = nil
-                }
-            }
-        )
-        ref.controller = controller
-        onboardingWindowController = controller
-        controller.refreshState()
-        controller.showWindow(nil)
-        controller.window?.makeKeyAndOrderFront(nil)
-        controller.window?.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-    }
-    
-    @objc private func openPrivacyMenuAction() {
-        openLegalDocument(.privacy)
-    }
-
-    @objc private func openTermsMenuAction() {
-        openLegalDocument(.terms)
-    }
-
-    public func openLegalDocument(_ document: LegalDocument) {
-        if legalWindowController == nil {
-            legalWindowController = LegalWindowController(document: document)
-        } else {
-            legalWindowController?.select(document: document)
-        }
-        legalWindowController?.showWindow(nil)
-        legalWindowController?.window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    public func openSettingsWindow(selectedTab: Int? = nil) {
-        closeTrayPopover()
-        if settingsWindowController == nil {
-            settingsWindowController = SettingsWindowController()
-        }
-        settingsWindowController?.refreshSettingsValues()
-        if let tab = selectedTab {
-            settingsWindowController?.selectTab(tab)
-        }
-        settingsWindowController?.showWindow(nil)
-        settingsWindowController?.window?.level = .normal
-        settingsWindowController?.window?.makeKeyAndOrderFront(nil)
-        settingsWindowController?.window?.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-    }
-    
-    @objc public func openTranscriptWindow() {
-        closeTrayPopover()
-        if transcriptWindowController == nil {
-            transcriptWindowController = TranscriptWindowController()
-        }
-        transcriptWindowController?.showWindow(nil)
-        transcriptWindowController?.window?.level = .normal
-        transcriptWindowController?.window?.makeKeyAndOrderFront(nil)
-        transcriptWindowController?.window?.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-    }
-    
-    @objc public func openPermissions() {
-        openSettingsWindow(selectedTab: 2)
-    }
-
-    @objc public func openAudioCalibration() {
-        openSettingsWindow(selectedTab: 3)
-    }
-    
     @objc private func quitApp() {
-        NSApp.terminate(nil)
-    }
-    
-    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showTrayPopoverAction()
-        return true
-    }
-    
-    public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return false
-    }
-    
-    public func applicationWillTerminate(_ notification: Notification) {
-        autoHideWorkItem?.cancel()
-        autoHideWorkItem = nil
-        LiveShareManager.shared.stopSharingSynchronously()
         CaptionCoordinator.shared.stop()
-        TranscriptManager.shared.flushPersistence()
-        AppSettings.shared.flushPersistence()
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
-        NotificationCenter.default.removeObserver(self)
-    }
-}
-
-
-extension AppDelegate: CaptionCoordinatorDelegate {
-    public func coordinatorDidRequestShowAlert(message: String, actionType: SystemAlertActionType) {
-        showSystemAlertBanner(message: message, actionType: actionType)
-    }
-    
-    public func coordinatorDidRequestClearAlert() {
-        clearSystemAlertBanner(dismissInCoordinator: false)
-    }
-    
-    public func coordinatorDidReceiveSpeech(
-        utteranceID: UUID,
-        speaker: String,
-        original: String,
-        translated: String,
-        sourceLangCode: String,
-        targetLangCode: String,
-        isFinal: Bool,
-        isUntranslated: Bool
-    ) {
-        handleSpeechReceived(
-            utteranceID: utteranceID,
-            speaker: speaker,
-            original: original,
-            translated: translated,
-            sourceLangCode: sourceLangCode,
-            targetLangCode: targetLangCode,
-            isFinal: isFinal,
-            isUntranslated: isUntranslated
-        )
-    }
-    
-    public func coordinatorDidUpdateAudioLevels(callerLevel: Float, micLevel: Float) {
-        if popover?.isShown == true {
-            trayViewController?.updateAudioLevels(callerLevel: callerLevel, micLevel: micLevel)
-        }
-        if settingsWindowController?.window?.isVisible == true {
-            settingsWindowController?.updateAudioLevels(callerLevel: callerLevel, micLevel: micLevel)
-        }
+        LiveShareManager.shared.stopSharingSynchronously()
+        NSApp.terminate(nil)
     }
 }

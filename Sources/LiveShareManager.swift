@@ -107,6 +107,11 @@ public final class LiveShareManager: @unchecked Sendable {
         var tunnelError: String? = nil
         var activeClientCount: Int = 0
         var isPaused: Bool = false
+        var allowLAN: Bool = false
+        var useExternalTunnel: Bool = true
+        var shareBothSpeakers: Bool = true
+        var foreignLanguageCode: String = "es"
+        var mainLanguageCode: String = "en"
         var history: [LiveCaptionEvent] = []
         var callerPartial: LiveCaptionEvent? = nil
         var micPartial: LiveCaptionEvent? = nil
@@ -320,11 +325,43 @@ public final class LiveShareManager: @unchecked Sendable {
     }
 
 
-    public func startSharing() {
+    public func configure(
+        allowLAN: Bool? = nil,
+        useExternalTunnel: Bool? = nil,
+        shareBothSpeakers: Bool? = nil,
+        foreignLanguageCode: String? = nil,
+        mainLanguageCode: String? = nil
+    ) {
+        let previousShareBoth = lock.withLock { state -> Bool in
+            let prev = state.shareBothSpeakers
+            if let allowLAN { state.allowLAN = allowLAN }
+            if let useExternalTunnel { state.useExternalTunnel = useExternalTunnel }
+            if let shareBothSpeakers { state.shareBothSpeakers = shareBothSpeakers }
+            if let foreignLanguageCode { state.foreignLanguageCode = foreignLanguageCode }
+            if let mainLanguageCode { state.mainLanguageCode = mainLanguageCode }
+            return prev
+        }
+        if let shareBothSpeakers, !shareBothSpeakers, previousShareBoth {
+            speakerSharingDidChange()
+        }
+    }
+
+    public func startSharing(
+        allowLAN: Bool? = nil,
+        useExternalTunnel: Bool? = nil,
+        shareBothSpeakers: Bool? = nil,
+        foreignLanguageCode: String? = nil,
+        mainLanguageCode: String? = nil
+    ) {
         let token = Self.generateSessionToken()
         let crypto = LiveShareCrypto()
         let keyFragment = crypto.keyFragment
         let capturedEpoch: UInt64? = lock.withLock { state -> UInt64? in
+            if let allowLAN { state.allowLAN = allowLAN }
+            if let useExternalTunnel { state.useExternalTunnel = useExternalTunnel }
+            if let shareBothSpeakers { state.shareBothSpeakers = shareBothSpeakers }
+            if let foreignLanguageCode { state.foreignLanguageCode = foreignLanguageCode }
+            if let mainLanguageCode { state.mainLanguageCode = mainLanguageCode }
             guard !state.isSharing else { return nil }
             state.isSharing = true
             state.sessionEpoch &+= 1
@@ -333,7 +370,7 @@ public final class LiveShareManager: @unchecked Sendable {
             state.sessionKeyFragment = keyFragment
             state.sessionCrypto = crypto
             state.port = 0
-            state.isTunnelStarting = AppSettings.shared.liveShareUseExternalTunnel
+            state.isTunnelStarting = state.useExternalTunnel
             state.tunnelError = nil
             state.isPaused = false
             state.publicURL = nil
@@ -438,10 +475,9 @@ public final class LiveShareManager: @unchecked Sendable {
         tearDownServerAndTunnelOnQueue()
         tunnelRestartAttempts = 0
 
-        let isStillValid = lock.withLock { $0.isSharing && $0.sessionEpoch == epoch }
+        let (isStillValid, allowLAN) = lock.withLock { ($0.isSharing && $0.sessionEpoch == epoch, $0.allowLAN) }
         guard isStillValid else { return }
 
-        let allowLAN = AppSettings.shared.allowLANShare
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = false
 
@@ -593,11 +629,11 @@ public final class LiveShareManager: @unchecked Sendable {
             return
         }
 
-        let (isSharingNow, token, localIP, tunnelHost) = lock.withLock { state -> (Bool, String, String, String?) in
+        let (isSharingNow, token, localIP, tunnelHost, allowLAN) = lock.withLock { state -> (Bool, String, String, String?, Bool) in
             guard state.isSharing && state.sessionEpoch == epoch else {
-                return (false, "", "127.0.0.1", nil)
+                return (false, "", "127.0.0.1", nil, false)
             }
-            return (true, state.sessionToken, state.localIP, state.tunnelHost)
+            return (true, state.sessionToken, state.localIP, state.tunnelHost, state.allowLAN)
         }
         guard isSharingNow else {
             connection.cancel()
@@ -608,7 +644,7 @@ public final class LiveShareManager: @unchecked Sendable {
             request: parsed,
             sessionToken: token,
             localIP: localIP,
-            allowLAN: AppSettings.shared.allowLANShare,
+            allowLAN: allowLAN,
             tunnelHost: tunnelHost
         )
 
@@ -686,8 +722,8 @@ public final class LiveShareManager: @unchecked Sendable {
         let (responseModel, crypto) = lock.withLock { state -> (APIStateResponse?, LiveShareCrypto?) in
             guard state.isSharing && state.sessionEpoch == epoch else { return (nil, nil) }
             let model = APIStateResponse(
-                foreignLanguage: AppSettings.shared.foreignLanguageCode,
-                mainLanguage: AppSettings.shared.mainLanguageCode,
+                foreignLanguage: state.foreignLanguageCode,
+                mainLanguage: state.mainLanguageCode,
                 callerPartial: state.callerPartial,
                 micPartial: state.micPartial,
                 history: Array(state.history.suffix(60)),
@@ -906,10 +942,6 @@ public final class LiveShareManager: @unchecked Sendable {
     ) {
         guard isSharing else { return }
 
-        if !AppSettings.shared.shareBothSpeakersOnLink && speaker.lowercased() == "caller" {
-            return
-        }
-
         let now = Date()
         let timeStr = Self.formatterLock.withLock {
             Self.timeFormatter.string(from: now)
@@ -917,7 +949,7 @@ public final class LiveShareManager: @unchecked Sendable {
 
         let (event, epoch, clearGen, crypto): (LiveCaptionEvent?, UInt64, UInt64, LiveShareCrypto?) = lock.withLock { state -> (LiveCaptionEvent?, UInt64, UInt64, LiveShareCrypto?) in
             guard state.isSharing else { return (nil, 0, 0, nil) }
-            if !AppSettings.shared.shareBothSpeakersOnLink && speaker.lowercased() == "caller" {
+            if !state.shareBothSpeakers && speaker.lowercased() == "caller" {
                 return (nil, 0, 0, nil)
             }
             if isFinal {
@@ -1093,7 +1125,7 @@ public final class LiveShareManager: @unchecked Sendable {
     }
 
     public func speakerSharingDidChange() {
-        let shareCaller = AppSettings.shared.shareBothSpeakersOnLink
+        let shareCaller = lock.withLock { $0.shareBothSpeakers }
         guard !shareCaller else { return }
         let (changed, clearGen, shouldBroadcast, epoch) = lock.withLock { state -> (Bool, UInt64, Bool, UInt64) in
             let hadCallerData = state.history.contains { $0.speaker.lowercased() == "caller" }
@@ -1139,21 +1171,133 @@ public final class LiveShareManager: @unchecked Sendable {
     }
 
 
+    private static let appSupportDirectory: URL = {
+        if ProcessInfo.processInfo.environment["CALLCAPTION_TEST"] == "1",
+           let testPath = ProcessInfo.processInfo.environment["CALLCAPTION_TEST_DIR"],
+           !testPath.isEmpty {
+            return URL(fileURLWithPath: testPath, isDirectory: true)
+                .appendingPathComponent("Application Support", isDirectory: true)
+        }
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return base.appendingPathComponent("CallCaption", isDirectory: true)
+    }()
+
+    public static func ensurePrivateDirectory(_ url: URL, permissions: Int = 0o700) throws {
+        let standardizedURL = url.standardizedFileURL
+        let appSupportURL = appSupportDirectory.standardizedFileURL
+        if standardizedURL != appSupportURL,
+           standardizedURL.path.hasPrefix(appSupportURL.path + "/") {
+            try ensurePrivateDirectory(appSupportURL, permissions: 0o700)
+        }
+
+        var st = Darwin.stat()
+        if Darwin.lstat(standardizedURL.path, &st) == 0 {
+            let fileType = st.st_mode & S_IFMT
+            if fileType == S_IFLNK {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(ELOOP),
+                    userInfo: [NSLocalizedDescriptionKey: "Refusing symlink directory at \(standardizedURL.path)"]
+                )
+            }
+            if fileType == S_IFDIR {
+                if (Int(st.st_mode) & 0o777) == permissions {
+                    return
+                }
+                let fd = Darwin.open(standardizedURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+                if fd >= 0 {
+                    defer { Darwin.close(fd) }
+                    if Darwin.fchmod(fd, mode_t(permissions)) == 0 {
+                        return
+                    }
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil)
+                }
+            }
+        }
+
+        try FileManager.default.createDirectory(
+            at: url,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: permissions)]
+        )
+        let fd = Darwin.open(standardizedURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard fd >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil)
+        }
+        defer { Darwin.close(fd) }
+        guard Darwin.fchmod(fd, mode_t(permissions)) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil)
+        }
+    }
+
+    public static func writePrivateData(_ data: Data, to url: URL) throws {
+        let parentURL = url.deletingLastPathComponent().standardizedFileURL
+        var st = Darwin.stat()
+        let needsEnsure: Bool
+        if Darwin.lstat(parentURL.path, &st) == 0 {
+            let fileType = st.st_mode & S_IFMT
+            needsEnsure = (fileType != S_IFDIR) || ((Int(st.st_mode) & 0o777) != 0o700)
+        } else {
+            needsEnsure = true
+        }
+        if needsEnsure {
+            try ensurePrivateDirectory(parentURL, permissions: 0o700)
+        }
+
+        let tempURL = parentURL.appendingPathComponent(".\(url.lastPathComponent).tmp.\(UUID().uuidString)")
+        let fd = Darwin.open(tempURL.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
+        if fd < 0 {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+
+        var fdOpen = true
+        var moved = false
+        defer {
+            if fdOpen { _ = Darwin.close(fd) }
+            if !moved { try? FileManager.default.removeItem(at: tempURL) }
+        }
+
+        _ = Darwin.fchmod(fd, mode_t(0o600))
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress, !rawBuffer.isEmpty else { return }
+            var offset = 0
+            while offset < rawBuffer.count {
+                let written = Darwin.write(fd, baseAddress.advanced(by: offset), rawBuffer.count - offset)
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                offset += written
+            }
+        }
+
+        fdOpen = false
+        if Darwin.close(fd) != 0 {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        if Darwin.rename(tempURL.path, url.path) != 0 {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        moved = true
+    }
+
     public static let pinnedSSHKnownHosts: String = """
     localhost.run,*.localhost.run,ssh.localhost.run,*.lhr.life ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9
     localhost.run,*.localhost.run,ssh.localhost.run,*.lhr.life ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC3lJnhW1oCXuAYV9IBdcJA+Vx7AHL5S/ZQvV2fhceOAPgO2kNQZla6xvUwoE4iw8lYu3zoE1KtieCU9yInWOVI6W/wFaT/ETH1tn55T2FVsK/zaxPiHZVJGLPPdEEid0vS2p1JDfc9onZ0pNSHLl1QusIOeMUyZ2bUMMLLgw46KOT9S3s/LmxgoJ3PocVUn5rVXz/Dng7Y8jYNe4IFrZOAUsi7hNBa+OYja6ceefpDvNDEJ1BdhbYfGolBdNA7f+FNl0kfaWru4Cblr843wBe2ckO/sNqgeAMXO/qH+SSgQxUXF2AgAw+TGp3yCIyYoOPvOgvcPsQziJLmDbUuQpnH
     """ + "\n"
 
     public static func ensureSSHKnownHostsPopulated(at url: URL) throws {
-        try AppPaths.ensureDirectory(url.deletingLastPathComponent())
+        try ensurePrivateDirectory(url.deletingLastPathComponent())
         let pinnedData = Data(pinnedSSHKnownHosts.utf8)
         if !FileManager.default.fileExists(atPath: url.path) {
-            try AppPaths.writePrivateData(pinnedData, to: url)
+            try writePrivateData(pinnedData, to: url)
         } else {
             let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
             if !existing.contains("AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9") {
                 let updated = pinnedSSHKnownHosts + (existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n" + existing)
-                try AppPaths.writePrivateData(Data(updated.utf8), to: url)
+                try writePrivateData(Data(updated.utf8), to: url)
             } else {
                 try? FileManager.default.setAttributes(
                     [.posixPermissions: NSNumber(value: 0o600)],
@@ -1163,15 +1307,17 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
-    private static var sshKnownHostsFileURL: URL? {
-        AppPaths.sshKnownHostsURL
+    public static var sshKnownHostsURL: URL {
+        appSupportDirectory.appendingPathComponent("ssh_known_hosts")
     }
 
     private func startTunnelProcessOnQueue(port: UInt16, epoch: UInt64) {
-        let isStillValid = lock.withLock { $0.isSharing && $0.sessionEpoch == epoch }
+        let (isStillValid, useExternalTunnel) = lock.withLock {
+            ($0.isSharing && $0.sessionEpoch == epoch, $0.useExternalTunnel)
+        }
         guard isStillValid else { return }
 
-        guard AppSettings.shared.liveShareUseExternalTunnel else {
+        guard useExternalTunnel else {
             terminateTunnelProcessOnQueue()
             let updated = lock.withLock { state -> Bool in
                 guard state.isSharing && state.sessionEpoch == epoch else { return false }
@@ -1185,10 +1331,7 @@ public final class LiveShareManager: @unchecked Sendable {
             return
         }
 
-        guard let knownHostsURL = Self.sshKnownHostsFileURL else {
-            markTunnelFailed(epoch: epoch, message: "Tunnel unavailable (no writable app-support directory)")
-            return
-        }
+        let knownHostsURL = Self.sshKnownHostsURL
         do {
             try Self.ensureSSHKnownHostsPopulated(at: knownHostsURL)
         } catch {
@@ -1229,8 +1372,10 @@ public final class LiveShareManager: @unchecked Sendable {
     }
 
     private func launchSSHTunnelOnQueue(port: UInt16, epoch: UInt64, knownHostsURL: URL) {
-        let isStillValid = lock.withLock { $0.isSharing && $0.sessionEpoch == epoch }
-        guard isStillValid, AppSettings.shared.liveShareUseExternalTunnel else { return }
+        let (isStillValid, useExternalTunnel) = lock.withLock {
+            ($0.isSharing && $0.sessionEpoch == epoch, $0.useExternalTunnel)
+        }
+        guard isStillValid, useExternalTunnel else { return }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -1392,7 +1537,7 @@ public final class LiveShareManager: @unchecked Sendable {
         tunnelStabilityWorkItem?.cancel()
         tunnelStabilityWorkItem = nil
 
-        guard AppSettings.shared.liveShareUseExternalTunnel else {
+        guard lock.withLock({ $0.useExternalTunnel }) else {
             let updated = lock.withLock { state -> Bool in
                 guard state.isSharing && state.sessionEpoch == epoch else { return false }
                 state.isTunnelStarting = false
@@ -1430,9 +1575,10 @@ public final class LiveShareManager: @unchecked Sendable {
     }
 
     private func scheduleTunnelRestart(epoch: UInt64, port: UInt16, updateConnectingStatus: Bool = false) {
-        guard AppSettings.shared.liveShareUseExternalTunnel else { return }
-        let stillSharing = lock.withLock { $0.isSharing && $0.sessionEpoch == epoch }
-        guard stillSharing else { return }
+        let stillSharingAndTunnelEnabled = lock.withLock {
+            $0.isSharing && $0.sessionEpoch == epoch && $0.useExternalTunnel
+        }
+        guard stillSharingAndTunnelEnabled else { return }
 
         terminateTunnelProcessOnQueue()
 

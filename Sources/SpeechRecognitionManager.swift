@@ -977,13 +977,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         }
 
         guard recognizer.isAvailable && recognizer.supportsOnDeviceRecognition else {
-            if SpeechAssetDownloader.shared.isDownloading(forCode: langCode) {
-                let pct = SpeechAssetDownloader.shared.progressPercent(forCode: langCode)
-                let suffix = pct > 0 ? " \(pct)%" : ""
-                noteFailure("Downloading \(langName) dictation model…\(suffix)", isDownloadingAsset: true)
-            } else {
-                noteFailure("Dictation language required: \(langName)")
-            }
+            noteFailure("Dictation language required: \(langName)")
             return
         }
 
@@ -1115,13 +1109,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                         } else {
                             let langCode = Self.baseLanguageCode(from: taskLocaleId)
                             let langName = SupportedLanguages.item(forCode: langCode)?.name ?? taskLocaleId
-                            if SpeechAssetDownloader.shared.isDownloading(forCode: langCode) {
-                                let pct = SpeechAssetDownloader.shared.progressPercent(forCode: langCode)
-                                let pctSuffix = pct > 0 ? " (\(pct)%)" : "…"
-                                self.noteFailure("Downloading \(langName) dictation model\(pctSuffix)", isDownloadingAsset: true)
-                            } else {
-                                self.noteFailure("Dictation language required: \(langName)")
-                            }
+                            self.noteFailure("Dictation language required: \(langName)")
                         }
                         return
 
@@ -1219,17 +1207,13 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         }
     }
 
-    private func noteFailure(_ message: String, isDownloadingAsset: Bool = false) {
+    private func noteFailure(_ message: String) {
         let now = ProcessInfo.processInfo.systemUptime
         let shouldReport = lock.withLock { state -> Bool in
-            if isDownloadingAsset {
-                state.failureBackoffUntil = now + 2.0
-            } else {
-                state.failureCount += 1
-                let exponent = min(5, max(1, state.failureCount))
-                let delays: [TimeInterval] = [2, 5, 15, 60, 300, 300]
-                state.failureBackoffUntil = now + delays[exponent - 1]
-            }
+            state.failureCount += 1
+            let exponent = min(5, max(1, state.failureCount))
+            let delays: [TimeInterval] = [2, 5, 15, 60, 300, 300]
+            state.failureBackoffUntil = now + delays[exponent - 1]
             let report = state.lastReportedFailure != message
                 || (now - state.lastFailureReportTime) >= 60
             if report {

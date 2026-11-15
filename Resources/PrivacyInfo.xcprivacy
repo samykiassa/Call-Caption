@@ -11,9 +11,7 @@
 	<key>NSPrivacyAccessedAPITypes</key>
 	<array>
 		<dict>
-			<!-- CA92.1 covers app-owned UserDefaults; LanguageModels.swift also reads macOS dictation
-			     preference suites (com.apple.assistant.support, com.apple.speech.recognition.AppleSpeechRecognition.prefs)
-			     read-only for on-device dictation availability checks. -->
+			<!-- CA92.1 covers app-owned UserDefaults preferences. -->
 			<key>NSPrivacyAccessedAPIType</key>
 			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
 			<key>NSPrivacyAccessedAPITypeReasons</key>

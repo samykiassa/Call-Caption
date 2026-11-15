@@ -84,6 +84,7 @@ swiftc \
     -target "$DEPLOYMENT_TARGET" \
     "$OBJ_HELPER" "$SWIFT_OBJ" \
     -framework Cocoa \
+    -framework SwiftUI \
     -framework AVFoundation \
     -framework Speech \
     -framework CoreAudio \

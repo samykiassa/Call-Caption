@@ -52,6 +52,7 @@ swiftc \
     "${SWIFT_SOURCES[@]}" \
     "$DIR/Tests/CallCaptionTests.swift" \
     -framework Cocoa \
+    -framework SwiftUI \
     -framework AVFoundation \
     -framework Speech \
     -framework CoreAudio \
