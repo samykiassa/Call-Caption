@@ -1,0 +1,4 @@
+"NSLocalNetworkUsageDescription" = "Compartir subtítulos en vivo con dispositivos de tu red local.";
+"NSSpeechRecognitionUsageDescription" = "Transcribir audio en tu Mac.";
+"NSMicrophoneUsageDescription" = "Transcribir y traducir el audio de tu micrófono.";
+"NSAudioCaptureUsageDescription" = "Capturar el audio del sistema para transcribir y traducir llamadas.";

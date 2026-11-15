@@ -1,0 +1,4 @@
+"NSLocalNetworkUsageDescription" = "Share live captions with devices on your local network.";
+"NSSpeechRecognitionUsageDescription" = "Transcribe audio on your Mac.";
+"NSMicrophoneUsageDescription" = "Transcribe and translate your microphone audio.";
+"NSAudioCaptureUsageDescription" = "Capture system audio to transcribe and translate calls.";
