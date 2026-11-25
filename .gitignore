@@ -3,7 +3,6 @@
 *.dSYM
 *.dSYM/
 *.dmg
-!Call-Caption.dmg
 *.o
 *.swiftmodule
 *.swiftdoc
