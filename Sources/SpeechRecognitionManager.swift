@@ -3,7 +3,7 @@ import Foundation
 @preconcurrency import AVFoundation
 import os
 
-public enum SpeechRecognitionErrorCode: Int, Sendable {
+enum SpeechRecognitionErrorCode: Int, Sendable {
     case dictationDisabled = 201
     case retry = 203
     case cancelled = 216
@@ -12,7 +12,16 @@ public enum SpeechRecognitionErrorCode: Int, Sendable {
     case notAuthorizedOrMissingAsset = 1700
 }
 
-public protocol BidirectionalSpeechDelegate: AnyObject {
+enum SpeechAuthIssueKind: Sendable, Equatable {
+    case speechPermissionDenied
+    case dictationDisabled
+    case dictationAssetRequired
+    case unsupportedLocale
+    case recognitionError
+    case translationSettings
+}
+
+protocol BidirectionalSpeechDelegate: AnyObject {
     func callerSpeechDidUpdate(utteranceID: UUID, partialOriginal: String, partialTranslated: String, isUntranslated: Bool)
     func callerSpeechDidFinalize(utteranceID: UUID, original: String, translated: String, isUntranslated: Bool)
     func micSpeechDidUpdate(utteranceID: UUID, partialOriginal: String, partialTranslated: String, isUntranslated: Bool)
@@ -25,10 +34,11 @@ public protocol BidirectionalSpeechDelegate: AnyObject {
     func micSpeechDidUpdate(utteranceID: UUID, partialOriginal: String, partialTranslated: String, sourceLangCode: String, targetLangCode: String, isUntranslated: Bool)
     func micSpeechDidFinalize(utteranceID: UUID, original: String, translated: String, sourceLangCode: String, targetLangCode: String, isUntranslated: Bool)
     func speechRecognitionDidEncounterAuthError(channelName: String, message: String)
+    func speechRecognitionDidEncounterIssue(channelName: String, kind: SpeechAuthIssueKind, message: String)
     func speechRecognitionDidClearAuthError(channelName: String)
 }
 
-public extension BidirectionalSpeechDelegate {
+extension BidirectionalSpeechDelegate {
     func callerSpeechDidUpdate(utteranceID: UUID, partialOriginal: String, partialTranslated: String, sourceLangCode: String, targetLangCode: String, isUntranslated: Bool) {
         callerSpeechDidUpdate(utteranceID: utteranceID, partialOriginal: partialOriginal, partialTranslated: partialTranslated, isUntranslated: isUntranslated)
     }
@@ -49,12 +59,16 @@ public extension BidirectionalSpeechDelegate {
         speechRecognitionDidEncounterAuthError(message: message)
     }
 
+    func speechRecognitionDidEncounterIssue(channelName: String, kind: SpeechAuthIssueKind, message: String) {
+        speechRecognitionDidEncounterAuthError(channelName: channelName, message: message)
+    }
+
     func speechRecognitionDidClearAuthError(channelName: String) {
         speechRecognitionDidClearAuthError()
     }
 }
 
-public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
+final class SingleSpeechChannel: NSObject, @unchecked Sendable {
     private struct SendablePCMBuffer: @unchecked Sendable {
         let buffer: AVAudioPCMBuffer
         let arrivalTime: TimeInterval
@@ -83,6 +97,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         let original: String
         let fallbackTranslated: String
         let fallbackUntranslated: Bool
+        let fallbackTranslatedSource: String
         let sourceLocaleId: String
         let targetLangCode: String
     }
@@ -94,8 +109,10 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
     private struct DrainingTask {
         let utteranceID: UUID
         var text: String
+        let alreadyCommittedText: String
         let fallbackTranslated: String
         let fallbackUntranslated: Bool
+        let fallbackTranslatedSource: String
         let sourceLocaleId: String
         let targetLangCode: String
         let task: SFSpeechRecognitionTask
@@ -106,23 +123,73 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         case final
     }
 
+    private struct UncheckedBox<Value>: @unchecked Sendable {
+        let value: Value
+    }
+
+    private struct Callbacks: @unchecked Sendable {
+        var onPartial: ((UUID, String, String, Bool) -> Void)?
+        var onFinal: ((UUID, String, String, Bool) -> Void)?
+        var onPartialWithLanguages: ((UUID, String, String, String, String, Bool) -> Void)?
+        var onFinalWithLanguages: ((UUID, String, String, String, String, Bool) -> Void)?
+        var onAuthError: ((String) -> Void)?
+        var onAuthSuccess: (() -> Void)?
+        var onAuthErrorWithChannel: ((String, String) -> Void)?
+        var onIssueWithChannel: ((String, SpeechAuthIssueKind, String) -> Void)?
+        var onAuthSuccessWithChannel: ((String) -> Void)?
+        var onSessionClosed: (() -> Void)?
+    }
+
+    private struct ActiveTasksState {
+        struct Entry {
+            let kind: TaskKind
+            let utteranceID: UUID?
+            let revision: UInt64
+            let cancelAllGen: UInt64
+            let cancelPartialGen: UInt64
+            var task: Task<Void, Never>?
+        }
+
+        var tasks: [UUID: Entry] = [:]
+        var cancelAllGeneration: UInt64 = 0
+        var cancelPartialsGeneration: UInt64 = 0
+        var utteranceFinalRevisions: [UUID: UInt64] = [:]
+        var utteranceRevisionOrder: [UUID] = []
+    }
+
     private static let terminalPunctuationScalars: Set<UnicodeScalar> = [
         ".", "?", "!", "\u{3002}", "\u{FF1F}", "\u{FF01}", "\u{061F}"
     ]
 
     private static let spokenNumberWords: Set<String> = [
+        // English
         "zero", "oh", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
         "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
         "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
         "eighty", "ninety", "hundred", "thousand", "million", "billion", "trillion",
         "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
         "half", "quarter", "percent", "dollar", "dollars", "cent", "cents", "euro", "euros", "pound", "pounds",
-        "point", "dot", "slash", "dash", "plus", "minus", "am", "pm"
+        "point", "dot", "slash", "dash", "plus", "minus", "am", "pm",
+        // Spanish (folded lowercase)
+        "cero", "uno", "una", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve",
+        "diez", "once", "doce", "trece", "catorce", "quince", "dieciseis", "diecisiete", "dieciocho", "diecinueve",
+        "veinte", "veintiuno", "veintidos", "veintitres", "veinticuatro", "veinticinco", "veintiseis",
+        "veintisiete", "veintiocho", "veintinueve", "treinta", "cuarenta", "cincuenta", "sesenta",
+        "setenta", "ochenta", "noventa", "cien", "ciento", "doscientos", "trescientos", "cuatrocientos",
+        "quinientos", "seiscientos", "setecientos", "ochocientos", "novecientos", "mil", "millon", "millones",
+        "cientos", "primero", "segundo", "tercero", "cuarto", "quinto", "ciento", "por", "punto", "coma",
+        "dolar", "dolares", "centavo", "centavos", "y",
+        // French / German / Italian / Portuguese basics
+        "un", "une", "deux", "trois", "quatre", "cinq", "sept", "huit", "neuf", "dix", "vingt", "cent", "mille",
+        "eins", "zwei", "drei", "vier", "funf", "sechs", "sieben", "acht", "neun", "zehn", "hundert", "tausend",
+        "due", "tre", "quattro", "sette", "otto", "nove", "dieci", "cento", "mila",
+        "um", "uma", "dois", "duas", "quatro", "sete", "oito", "cem", "cento"
     ]
 
     private struct AudioState {
         var isRunning: Bool = false
         var isSuspended: Bool = false
+        var isRequestingSpeechAuth: Bool = false
         var sessionStartToken: UUID? = nil
         var isStartingSession: Bool { sessionStartToken != nil }
         var isRestartScheduled: Bool = false
@@ -134,23 +201,28 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         var task: SFSpeechRecognitionTask? = nil
         var sessionStartTime: TimeInterval = ProcessInfo.processInfo.systemUptime
         var lastBufferArrivalTime: TimeInterval = 0
-        var pendingPCMBuffers: [SendablePCMBuffer] = []
-        var recentSessionBuffers: [SendablePCMBuffer] = []
+        var pendingPCMBuffers = RingBuffer<SendablePCMBuffer>()
+        var recentSessionBuffers = RingBuffer<SendablePCMBuffer>()
         var consecutiveErrors: Int = 0
         var failureBackoffUntil: TimeInterval = 0
         var failureCount: Int = 0
         var lastReportedFailure: String? = nil
         var lastFailureReportTime: TimeInterval = 0
+        var lastFailureKind: SpeechAuthIssueKind? = nil
+        var hasReportedAuthHealthy: Bool = false
 
         var currentUtteranceID: UUID? = nil
         var currentOriginal: String = ""
         var currentTranslated: String = ""
+        var currentTranslatedSourceText: String = ""
         var currentIsUntranslated: Bool = false
         var lastRawFullText: String = ""
         var lastSpeechActivityTime: TimeInterval = 0
+        var requiredSilenceIdle: TimeInterval = 1.65
         var restartWorkItem: SendableWorkItem? = nil
         var silenceCommitWorkItem: SendableWorkItem? = nil
         var noBufferWatchdogWorkItem: SendableWorkItem? = nil
+        var partialThrottleWorkItem: SendableWorkItem? = nil
 
         var sessionEpoch: UInt64 = 0
         var resetEpoch: UInt64 = 0
@@ -161,20 +233,22 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         var isTranslating: Bool = false
         var activeTranslationTaskId: UUID? = nil
         var pendingTailText: String? = nil
+        var lastPartialTranslationStartTime: TimeInterval = 0
     }
 
     private let lock: OSAllocatedUnfairLock<AudioState>
     // Serializes SFSpeechAudioBufferRecognitionRequest.append vs endAudio;
     // lock ordering invariant: always acquire `lock` before `requestIOLock`, never reverse.
     private let requestIOLock = NSLock()
+    private let callbackLock = OSAllocatedUnfairLock(initialState: Callbacks())
 
-    public let channelName: String
+    let channelName: String
 
-    public var sourceLocaleId: String {
+    var sourceLocaleId: String {
         lock.withLock { $0.sourceLocaleId }
     }
 
-    public var targetLangCode: String {
+    var targetLangCode: String {
         lock.withLock { $0.targetLangCode }
     }
 
@@ -186,30 +260,216 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         lock.withLock { $0.discardEpoch }
     }
 
-    public var onPartial: ((UUID, String, String, Bool) -> Void)?
-    public var onFinal: ((UUID, String, String, Bool) -> Void)?
-    public var onPartialWithLanguages: ((UUID, String, String, String, String, Bool) -> Void)?
-    public var onFinalWithLanguages: ((UUID, String, String, String, String, Bool) -> Void)?
-    public var onAuthError: ((String) -> Void)?
-    public var onAuthSuccess: (() -> Void)?
-    public var onAuthErrorWithChannel: ((String, String) -> Void)?
-    public var onAuthSuccessWithChannel: ((String) -> Void)?
-    public var onSessionClosed: (() -> Void)?
+    var onPartial: ((UUID, String, String, Bool) -> Void)? {
+        get { callbackLock.withLock { UncheckedBox(value: $0.onPartial) }.value }
+        set {
+            let box = UncheckedBox(value: newValue)
+            callbackLock.withLock { $0.onPartial = box.value }
+        }
+    }
 
-    private let activeTasksLock = OSAllocatedUnfairLock(initialState: [UUID: (kind: TaskKind, task: Task<Void, Never>)]())
+    var onFinal: ((UUID, String, String, Bool) -> Void)? {
+        get { callbackLock.withLock { UncheckedBox(value: $0.onFinal) }.value }
+        set {
+            let box = UncheckedBox(value: newValue)
+            callbackLock.withLock { $0.onFinal = box.value }
+        }
+    }
+
+    var onPartialWithLanguages: ((UUID, String, String, String, String, Bool) -> Void)? {
+        get { callbackLock.withLock { UncheckedBox(value: $0.onPartialWithLanguages) }.value }
+        set {
+            let box = UncheckedBox(value: newValue)
+            callbackLock.withLock { $0.onPartialWithLanguages = box.value }
+        }
+    }
+
+    var onFinalWithLanguages: ((UUID, String, String, String, String, Bool) -> Void)? {
+        get { callbackLock.withLock { UncheckedBox(value: $0.onFinalWithLanguages) }.value }
+        set {
+            let box = UncheckedBox(value: newValue)
+            callbackLock.withLock { $0.onFinalWithLanguages = box.value }
+        }
+    }
+
+    var onAuthError: ((String) -> Void)? {
+        get { callbackLock.withLock { UncheckedBox(value: $0.onAuthError) }.value }
+        set {
+            let box = UncheckedBox(value: newValue)
+            callbackLock.withLock { $0.onAuthError = box.value }
+        }
+    }
+
+    var onAuthSuccess: (() -> Void)? {
+        get { callbackLock.withLock { UncheckedBox(value: $0.onAuthSuccess) }.value }
+        set {
+            let box = UncheckedBox(value: newValue)
+            callbackLock.withLock { $0.onAuthSuccess = box.value }
+        }
+    }
+
+    var onAuthErrorWithChannel: ((String, String) -> Void)? {
+        get { callbackLock.withLock { UncheckedBox(value: $0.onAuthErrorWithChannel) }.value }
+        set {
+            let box = UncheckedBox(value: newValue)
+            callbackLock.withLock { $0.onAuthErrorWithChannel = box.value }
+        }
+    }
+
+    var onIssueWithChannel: ((String, SpeechAuthIssueKind, String) -> Void)? {
+        get { callbackLock.withLock { UncheckedBox(value: $0.onIssueWithChannel) }.value }
+        set {
+            let box = UncheckedBox(value: newValue)
+            callbackLock.withLock { $0.onIssueWithChannel = box.value }
+        }
+    }
+
+    var onAuthSuccessWithChannel: ((String) -> Void)? {
+        get { callbackLock.withLock { UncheckedBox(value: $0.onAuthSuccessWithChannel) }.value }
+        set {
+            let box = UncheckedBox(value: newValue)
+            callbackLock.withLock { $0.onAuthSuccessWithChannel = box.value }
+        }
+    }
+
+    var onSessionClosed: (() -> Void)? {
+        get { callbackLock.withLock { UncheckedBox(value: $0.onSessionClosed) }.value }
+        set {
+            let box = UncheckedBox(value: newValue)
+            callbackLock.withLock { $0.onSessionClosed = box.value }
+        }
+    }
+
+    private let activeTasksLock = OSAllocatedUnfairLock(initialState: ActiveTasksState())
+    private static let maxTrackedUtteranceRevisions = 256
+
+    private static func bumpUtteranceFinalRevisionLocked(_ state: inout ActiveTasksState, utteranceID: UUID) -> (revision: UInt64, supersededTasks: [Task<Void, Never>]) {
+        if state.utteranceFinalRevisions[utteranceID] == nil {
+            state.utteranceRevisionOrder.append(utteranceID)
+        }
+        let nextRev = (state.utteranceFinalRevisions[utteranceID] ?? 0) &+ 1
+        state.utteranceFinalRevisions[utteranceID] = nextRev
+
+        var superseded: [Task<Void, Never>] = []
+        for (id, entry) in state.tasks where entry.kind == .final && entry.utteranceID == utteranceID {
+            if let existingTask = entry.task {
+                superseded.append(existingTask)
+            }
+            state.tasks.removeValue(forKey: id)
+        }
+
+        if state.utteranceRevisionOrder.count > maxTrackedUtteranceRevisions {
+            let activeFinalUtteranceIDs = Set(state.tasks.values.compactMap { $0.kind == .final ? $0.utteranceID : nil })
+            var scan = 0
+            while state.utteranceRevisionOrder.count > maxTrackedUtteranceRevisions && scan < state.utteranceRevisionOrder.count {
+                let candidate = state.utteranceRevisionOrder[scan]
+                if candidate != utteranceID && !activeFinalUtteranceIDs.contains(candidate) {
+                    state.utteranceRevisionOrder.remove(at: scan)
+                    state.utteranceFinalRevisions.removeValue(forKey: candidate)
+                } else {
+                    scan += 1
+                }
+            }
+        }
+        return (nextRev, superseded)
+    }
+
+    private func advanceFinalRevisionAndCancelPrior(for utteranceID: UUID) {
+        let superseded = activeTasksLock.withLock { state -> [Task<Void, Never>] in
+            Self.bumpUtteranceFinalRevisionLocked(&state, utteranceID: utteranceID).supersededTasks
+        }
+        for task in superseded {
+            task.cancel()
+        }
+    }
+
+    private func reservePartialTranslationTask(id: UUID) {
+        activeTasksLock.withLock { state in
+            state.tasks[id] = ActiveTasksState.Entry(
+                kind: .partial,
+                utteranceID: nil,
+                revision: 0,
+                cancelAllGen: state.cancelAllGeneration,
+                cancelPartialGen: state.cancelPartialsGeneration,
+                task: nil
+            )
+        }
+    }
+
+    private func reserveFinalTranslationTask(for utteranceID: UUID) -> (id: UUID, revision: UInt64) {
+        let id = UUID()
+        let (revision, superseded) = activeTasksLock.withLock { state -> (UInt64, [Task<Void, Never>]) in
+            let bumped = Self.bumpUtteranceFinalRevisionLocked(&state, utteranceID: utteranceID)
+            state.tasks[id] = ActiveTasksState.Entry(
+                kind: .final,
+                utteranceID: utteranceID,
+                revision: bumped.revision,
+                cancelAllGen: state.cancelAllGeneration,
+                cancelPartialGen: state.cancelPartialsGeneration,
+                task: nil
+            )
+            return (bumped.revision, bumped.supersededTasks)
+        }
+        for task in superseded {
+            task.cancel()
+        }
+        return (id, revision)
+    }
+
+    private func isLatestFinalRevision(_ revision: UInt64, for utteranceID: UUID) -> Bool {
+        activeTasksLock.withLock { state in
+            state.utteranceFinalRevisions[utteranceID] == revision
+        }
+    }
+
+    private func attachTranslationTask(_ task: Task<Void, Never>, id: UUID) {
+        let shouldCancel = activeTasksLock.withLock { state -> Bool in
+            guard var entry = state.tasks[id] else {
+                // Already finished (unregistered) or already cancelled/superseded before attachment.
+                return true
+            }
+            let cancelledByGen = (state.cancelAllGeneration != entry.cancelAllGen)
+                || (entry.kind == .partial && state.cancelPartialsGeneration != entry.cancelPartialGen)
+            let supersededFinal = (entry.kind == .final)
+                && (entry.utteranceID.map { state.utteranceFinalRevisions[$0] != entry.revision } ?? false)
+            if cancelledByGen || supersededFinal {
+                state.tasks.removeValue(forKey: id)
+                return true
+            }
+            entry.task = task
+            state.tasks[id] = entry
+            return false
+        }
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    private func unregisterTranslationTask(id: UUID) {
+        activeTasksLock.withLock { state in
+            _ = state.tasks.removeValue(forKey: id)
+        }
+    }
 
     private func cancelInFlightTranslationTasks(partialsOnly: Bool = false) {
-        let tasksToCancel = activeTasksLock.withLock { tasks -> [Task<Void, Never>] in
+        let tasksToCancel = activeTasksLock.withLock { state -> [Task<Void, Never>] in
             if partialsOnly {
+                state.cancelPartialsGeneration &+= 1
                 var cancelled: [Task<Void, Never>] = []
-                for (id, entry) in tasks where entry.kind == .partial {
-                    cancelled.append(entry.task)
-                    tasks.removeValue(forKey: id)
+                for (id, entry) in state.tasks where entry.kind == .partial {
+                    if let task = entry.task {
+                        cancelled.append(task)
+                    }
+                    state.tasks.removeValue(forKey: id)
                 }
                 return cancelled
             } else {
-                let list = Array(tasks.values.map(\.task))
-                tasks.removeAll()
+                state.cancelAllGeneration &+= 1
+                state.cancelPartialsGeneration &+= 1
+                let list = state.tasks.values.compactMap(\.task)
+                state.tasks.removeAll()
+                state.utteranceFinalRevisions.removeAll(keepingCapacity: true)
+                state.utteranceRevisionOrder.removeAll(keepingCapacity: true)
                 return list
             }
         }
@@ -227,27 +487,14 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
     }
 
     private static func translationLanguageCode(from identifier: String, resolveBareChinese: Bool = false) -> String {
-        let norm = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clean = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "_", with: "-")
             .lowercased()
-        if norm == "zh-tw" || norm == "zh-hk" || norm == "zh-hant" || norm.hasPrefix("zh-hant-") {
-            return "zh-hant"
+        if clean == "zh" && resolveBareChinese {
+            let preferred = SupportedLanguages.bestLocale(forCode: "zh").identifier
+            return SupportedLanguages.translationCode(from: preferred)
         }
-        if norm == "zh-cn" || norm == "zh-sg" || norm == "zh-hans" || norm.hasPrefix("zh-hans-") {
-            return "zh-hans"
-        }
-        if norm == "zh" {
-            if resolveBareChinese {
-                let preferred = SupportedLanguages.bestLocale(forCode: "zh").identifier
-                    .replacingOccurrences(of: "_", with: "-")
-                    .lowercased()
-                if preferred.contains("tw") || preferred.contains("hk") || preferred.contains("hant") {
-                    return "zh-hant"
-                }
-            }
-            return "zh-hans"
-        }
-        return baseLanguageCode(from: norm)
+        return SupportedLanguages.translationCode(from: clean)
     }
 
     private func appendBuffer(_ buffer: AVAudioPCMBuffer, to managed: ManagedRequest?) -> Bool {
@@ -272,20 +519,24 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         }
     }
 
-    public var isRunning: Bool {
+    var isRunning: Bool {
         lock.withLock { $0.isRunning }
     }
 
-    public var isSuspended: Bool {
+    var isSuspended: Bool {
         lock.withLock { $0.isSuspended }
     }
 
     private let pauseCommitInterval: TimeInterval = 1.65
     private let noBufferIdleTimeout: TimeInterval = 0.65
     private let maxSuspendedBuffers = 180
+    private let maxSuspendedEchoBuffers = 80
+    private let maxSuspendedEchoGap: TimeInterval = 1.25
+    private let maxSuspendedEchoAge: TimeInterval = 2.50
     private static let drainTimeout: TimeInterval = 1.2
+    private static let partialTranslationThrottleInterval: TimeInterval = 0.18
 
-    public init(name: String, sourceLocaleId: String, targetLangCode: String) {
+    init(name: String, sourceLocaleId: String, targetLangCode: String) {
         self.channelName = name
         self.lock = OSAllocatedUnfairLock(initialState: AudioState(
             sourceLocaleId: sourceLocaleId,
@@ -299,10 +550,15 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         state.currentUtteranceID = nil
         state.currentOriginal = ""
         state.currentTranslated = ""
+        state.currentTranslatedSourceText = ""
         state.currentIsUntranslated = false
         state.pendingTailText = nil
         state.isTranslating = false
         state.activeTranslationTaskId = nil
+        state.lastPartialTranslationStartTime = 0
+        state.requiredSilenceIdle = 1.65
+        state.partialThrottleWorkItem?.item.cancel()
+        state.partialThrottleWorkItem = nil
     }
 
     private static func consumePendingCommit(_ state: inout AudioState) -> PendingCommit? {
@@ -316,6 +572,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             original: trimmed,
             fallbackTranslated: state.currentTranslated,
             fallbackUntranslated: state.currentIsUntranslated,
+            fallbackTranslatedSource: state.currentTranslatedSourceText,
             sourceLocaleId: state.sourceLocaleId,
             targetLangCode: state.targetLangCode
         )
@@ -331,6 +588,8 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         state.silenceCommitWorkItem = nil
         state.noBufferWatchdogWorkItem?.item.cancel()
         state.noBufferWatchdogWorkItem = nil
+        state.partialThrottleWorkItem?.item.cancel()
+        state.partialThrottleWorkItem = nil
     }
 
     /// Detaches the current recognition task from the live session and parks it
@@ -339,29 +598,35 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
     /// finishes (or when `drainTimeout` elapses). Returns the drain id to schedule
     /// a timeout for, or a commit to perform immediately when there is no live task.
     /// The caller is responsible for calling `endManagedRequest(...)` on the request.
-    private static func retireTaskForDraining(_ state: inout AudioState) -> (drainId: UInt64?, commit: PendingCommit?) {
+    private static func retireTaskForDraining(
+        _ state: inout AudioState,
+        alreadyCommitted: PendingCommit? = nil
+    ) -> (drainId: UInt64?, commit: PendingCommit?) {
         let srcLocale = state.sourceLocaleId
         let tgtCode = state.targetLangCode
-        let commit = consumePendingCommit(&state)
-        guard let task = state.task else { return (nil, commit) }
+        let freshCommit = consumePendingCommit(&state)
+        let effectiveCommit = freshCommit ?? alreadyCommitted
+        guard let task = state.task else { return (nil, freshCommit) }
         state.task = nil
         switch task.state {
         case .starting, .running, .finishing:
             break
         default:
-            return (nil, commit)
+            return (nil, freshCommit)
         }
         let id = state.activeTaskId
         if let existing = state.drainingTasks.removeValue(forKey: id) {
             existing.task.cancel()
         }
         state.drainingTasks[id] = DrainingTask(
-            utteranceID: commit?.utteranceID ?? UUID(),
-            text: commit?.original ?? "",
-            fallbackTranslated: commit?.fallbackTranslated ?? "",
-            fallbackUntranslated: commit?.fallbackUntranslated ?? true,
-            sourceLocaleId: commit?.sourceLocaleId ?? srcLocale,
-            targetLangCode: commit?.targetLangCode ?? tgtCode,
+            utteranceID: effectiveCommit?.utteranceID ?? UUID(),
+            text: effectiveCommit?.original ?? "",
+            alreadyCommittedText: freshCommit == nil ? (alreadyCommitted?.original ?? "") : "",
+            fallbackTranslated: effectiveCommit?.fallbackTranslated ?? "",
+            fallbackUntranslated: effectiveCommit?.fallbackUntranslated ?? true,
+            fallbackTranslatedSource: effectiveCommit?.fallbackTranslatedSource ?? "",
+            sourceLocaleId: effectiveCommit?.sourceLocaleId ?? srcLocale,
+            targetLangCode: effectiveCommit?.targetLangCode ?? tgtCode,
             task: task
         )
         return (id, nil)
@@ -398,11 +663,12 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         }
         guard let drain = drain else { return }
         drain.task.cancel()
-        guard !drain.text.isEmpty else { return }
+        guard !drain.text.isEmpty, drain.text != drain.alreadyCommittedText else { return }
         commitCompletedSentence(
             drain.text,
             fallbackTranslated: drain.fallbackTranslated,
             fallbackUntranslated: drain.fallbackUntranslated,
+            fallbackTranslatedSource: drain.fallbackTranslatedSource,
             utteranceID: drain.utteranceID,
             sourceLocaleId: drain.sourceLocaleId,
             targetLangCode: drain.targetLangCode
@@ -417,23 +683,18 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         return candidate.count * 10 >= previous.count * 7 ? candidate : previous
     }
 
-    private func takeAllDrains() -> [DrainingTask] {
-        lock.withLock { state -> [DrainingTask] in
-            let all = Array(state.drainingTasks.values)
-            state.drainingTasks.removeAll()
-            return all
-        }
-    }
-
-    public func start(sourceLocaleId: String, targetLangCode: String) {
+    func start(sourceLocaleId: String, targetLangCode: String) {
         stop()
-        cancelInFlightTranslationTasks(partialsOnly: false)
+        // Keep in-flight final refinement tasks from the just-stopped utterance alive
+        // so completed sentences retain their translated text across restarts/language changes.
+        cancelInFlightTranslationTasks(partialsOnly: true)
         let normLocale = sourceLocaleId.replacingOccurrences(of: "_", with: "-")
         lock.withLock { state in
             state.sourceLocaleId = normLocale
             state.targetLangCode = targetLangCode
             state.isRunning = true
             state.isSuspended = false
+            state.sessionStartToken = nil
             state.isRestartScheduled = false
             state.isRotationScheduled = false
             state.consecutiveErrors = 0
@@ -446,9 +707,10 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             state.failureCount = 0
             state.lastReportedFailure = nil
             state.lastFailureReportTime = 0
+            state.lastFailureKind = nil
+            state.hasReportedAuthHealthy = false
             state.sessionEpoch &+= 1
             state.resetEpoch &+= 1
-            state.discardEpoch &+= 1
             state.sessionTaskId &+= 1
             Self.cancelWorkItems(&state)
             Self.resetSessionTrackingState(&state)
@@ -457,22 +719,26 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         setupRecognizer()
     }
 
-    public func stop() {
-        let (oldReq, oldTask, pendingCommit) = lock.withLock { state -> (ManagedRequest?, SFSpeechRecognitionTask?, PendingCommit?) in
+    func stop() {
+        let (oldReq, oldTask, pendingCommit, drains) = lock.withLock { state -> (ManagedRequest?, SFSpeechRecognitionTask?, PendingCommit?, [DrainingTask]) in
             state.isRunning = false
             state.isSuspended = false
+            state.sessionStartToken = nil
             state.isRestartScheduled = false
             state.isRotationScheduled = false
             let r = state.request
             state.request = nil
             let t = state.task
             state.task = nil
+            let existingDrains = Array(state.drainingTasks.values)
+            state.drainingTasks.removeAll()
             state.pendingPCMBuffers.removeAll(keepingCapacity: false)
             state.recentSessionBuffers.removeAll(keepingCapacity: false)
             state.failureBackoffUntil = 0
             state.failureCount = 0
             state.lastReportedFailure = nil
             state.lastFailureReportTime = 0
+            state.lastFailureKind = nil
             state.sessionTaskId &+= 1
             state.resetEpoch &+= 1
             Self.cancelWorkItems(&state)
@@ -480,20 +746,21 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             if commit == nil {
                 state.sessionEpoch &+= 1
             }
-            return (r, t, commit)
+            return (r, t, commit, existingDrains)
         }
 
         // Cancel in-flight partial translations before committing finalized drains/pending utterances,
         // while keeping newly spawned final refinement tasks alive to deliver updated translations.
         cancelInFlightTranslationTasks(partialsOnly: true)
 
-        for drain in takeAllDrains() {
+        for drain in drains {
             drain.task.cancel()
-            if !drain.text.isEmpty {
+            if !drain.text.isEmpty && drain.text != drain.alreadyCommittedText {
                 commitCompletedSentence(
                     drain.text,
                     fallbackTranslated: drain.fallbackTranslated,
                     fallbackUntranslated: drain.fallbackUntranslated,
+                    fallbackTranslatedSource: drain.fallbackTranslatedSource,
                     utteranceID: drain.utteranceID,
                     sourceLocaleId: drain.sourceLocaleId,
                     targetLangCode: drain.targetLangCode
@@ -506,6 +773,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 commit.original,
                 fallbackTranslated: commit.fallbackTranslated,
                 fallbackUntranslated: commit.fallbackUntranslated,
+                fallbackTranslatedSource: commit.fallbackTranslatedSource,
                 utteranceID: commit.utteranceID,
                 sourceLocaleId: commit.sourceLocaleId,
                 targetLangCode: commit.targetLangCode
@@ -517,7 +785,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         oldTask?.cancel()
     }
 
-    public func resetFailureState() {
+    func resetFailureState() {
         lock.withLock {
             $0.failureBackoffUntil = 0
             $0.failureCount = 0
@@ -526,12 +794,136 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         }
     }
 
-    public func discardInFlight() {
-        let (oldReq, oldTask) = lock.withLock { state -> (ManagedRequest?, SFSpeechRecognitionTask?) in
+    func revalidateAuthorizationAndStatus() {
+        let (running, localeId, capturedResetEpoch, previousFailureKind, shouldScheduleRestart) = lock.withLock { state -> (Bool, String, UInt64, SpeechAuthIssueKind?, Bool) in
+            let prevKind = state.lastFailureKind
+            state.failureBackoffUntil = 0
+            state.failureCount = 0
+            state.lastReportedFailure = nil
+            state.lastFailureReportTime = 0
+            let canRestart = state.isRunning && !state.isSuspended && !state.isRequestingSpeechAuth && state.request == nil && !state.pendingPCMBuffers.isEmpty
+            return (state.isRunning, state.sourceLocaleId, state.resetEpoch, prevKind, canRestart)
+        }
+        guard running else { return }
+
+        SupportedLanguages.invalidateLocaleResolutionCache()
+        let langCode = Self.baseLanguageCode(from: localeId)
+        let primaryLoc = SupportedLanguages.bestLocale(forCode: localeId)
+        let primaryRec = SFSpeechRecognizer(locale: primaryLoc)
+        let (resolvedLoc, resolvedRecognizer): (Locale, SFSpeechRecognizer?) = {
+            if primaryRec == nil || primaryRec?.supportsOnDeviceRecognition == false {
+                let fallbackLoc = SupportedLanguages.bestLocale(forCode: langCode)
+                if let fallbackRec = SFSpeechRecognizer(locale: fallbackLoc),
+                   fallbackRec.supportsOnDeviceRecognition {
+                    return (fallbackLoc, fallbackRec)
+                }
+            }
+            return (primaryLoc, primaryRec)
+        }()
+        let resolvedLocIdentifier = resolvedLoc.identifier.replacingOccurrences(of: "_", with: "-")
+        let langName = SupportedLanguages.item(forCode: langCode)?.localizedName ?? localeId
+        let stillCurrent = lock.withLock { state -> Bool in
+            guard state.isRunning,
+                  state.resetEpoch == capturedResetEpoch,
+                  state.sourceLocaleId == localeId else {
+                return false
+            }
+            state.recognizer = resolvedRecognizer
+            state.sourceLocaleId = resolvedLocIdentifier
+            return true
+        }
+        guard stillCurrent else { return }
+
+        guard let rec = resolvedRecognizer else {
+            noteFailure(
+                kind: .unsupportedLocale,
+                message: AppL10n.format(
+                    "speech.error.unsupported_locale",
+                    fallback: "Speech recognition locale '%@' is not supported by macOS.",
+                    langName
+                ),
+                expectedResetEpoch: capturedResetEpoch
+            )
+            return
+        }
+
+        let authStatus = SFSpeechRecognizer.authorizationStatus()
+        if authStatus == .denied || authStatus == .restricted {
+            noteFailure(
+                kind: .speechPermissionDenied,
+                message: AppL10n.string(
+                    "speech.error.access_required",
+                    fallback: "Speech Recognition access required"
+                ),
+                expectedResetEpoch: capturedResetEpoch
+            )
+            return
+        }
+
+        if authStatus == .authorized && !rec.supportsOnDeviceRecognition {
+            noteFailure(
+                kind: .dictationAssetRequired,
+                message: AppL10n.format(
+                    "speech.error.dictation_required",
+                    fallback: "Dictation language required: %@",
+                    langName
+                ),
+                expectedResetEpoch: capturedResetEpoch
+            )
+            return
+        }
+
+        if authStatus == .authorized && rec.supportsOnDeviceRecognition && !rec.isAvailable {
+            noteFailure(
+                kind: .recognitionError,
+                message: AppL10n.format(
+                    "speech.error.unavailable",
+                    fallback: "Speech recognition for %@ is temporarily unavailable. Try again in a moment.",
+                    langName
+                ),
+                expectedResetEpoch: capturedResetEpoch
+            )
+            return
+        }
+
+        if authStatus == .authorized && rec.supportsOnDeviceRecognition && rec.isAvailable {
+            let (stillValid, canRestartNow) = lock.withLock { state -> (Bool, Bool) in
+                guard state.isRunning, state.resetEpoch == capturedResetEpoch else {
+                    return (false, false)
+                }
+                if previousFailureKind != .dictationDisabled && state.lastFailureKind == previousFailureKind {
+                    state.lastFailureKind = nil
+                }
+                if previousFailureKind != .dictationDisabled {
+                    state.hasReportedAuthHealthy = true
+                }
+                let restart = shouldScheduleRestart && !state.isSuspended && !state.isRequestingSpeechAuth && state.request == nil && !state.pendingPCMBuffers.isEmpty
+                return (true, restart)
+            }
+            guard stillValid else { return }
+            if previousFailureKind != .dictationDisabled {
+                let chName = channelName
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.isRunning, self.currentResetEpoch == capturedResetEpoch else { return }
+                    self.onAuthSuccess?()
+                    self.onAuthSuccessWithChannel?(chName)
+                }
+            }
+            if canRestartNow {
+                scheduleRestart(after: 0.05, forceReplace: false)
+            }
+        }
+    }
+
+    func discardInFlight() {
+        let (oldReq, oldTask, drains) = lock.withLock { state -> (ManagedRequest?, SFSpeechRecognitionTask?, [DrainingTask]) in
             let r = state.request
             state.request = nil
             let t = state.task
             state.task = nil
+            let existingDrains = Array(state.drainingTasks.values)
+            state.drainingTasks.removeAll()
+            state.sessionStartToken = nil
             state.isRestartScheduled = false
             state.isRotationScheduled = false
             state.pendingPCMBuffers.removeAll(keepingCapacity: false)
@@ -542,9 +934,9 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             state.discardEpoch &+= 1
             Self.cancelWorkItems(&state)
             Self.resetSessionTrackingState(&state)
-            return (r, t)
+            return (r, t, existingDrains)
         }
-        for drain in takeAllDrains() {
+        for drain in drains {
             drain.task.cancel()
         }
         cancelInFlightTranslationTasks(partialsOnly: false)
@@ -553,21 +945,23 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
     }
 
     #if CALLCAPTION_TESTING
-    public func commitSentenceForTesting(
+    func commitSentenceForTesting(
         utteranceID: UUID,
         original: String,
         fallbackTranslated: String = "",
-        fallbackUntranslated: Bool = true
+        fallbackUntranslated: Bool = true,
+        fallbackTranslatedSource: String? = nil
     ) {
         commitCompletedSentence(
             original,
             fallbackTranslated: fallbackTranslated,
             fallbackUntranslated: fallbackUntranslated,
+            fallbackTranslatedSource: fallbackTranslatedSource,
             utteranceID: utteranceID
         )
     }
 
-    public func advanceUtteranceEpochForTesting() {
+    func advanceUtteranceEpochForTesting() {
         lock.withLock { state in
             state.sessionEpoch &+= 1
             state.isTranslating = false
@@ -575,15 +969,19 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         }
     }
 
-    public static func isLikelyInverseTextNormalizationForTesting(previous: String, updated: String) -> Bool {
+    static func isLikelyInverseTextNormalizationForTesting(previous: String, updated: String) -> Bool {
         isLikelyInverseTextNormalization(previous: previous, updated: updated)
     }
 
-    public func processRecognizedTextForTesting(_ text: String, isFinal: Bool = false) {
+    func processRecognizedTextForTesting(_ text: String, isFinal: Bool = false) {
         processRecognizedSessionText(text, isFinal: isFinal)
     }
 
-    public func activeUtteranceStateForTesting() -> (
+    func pendingBufferCountForTesting() -> Int {
+        lock.withLock { $0.pendingPCMBuffers.count }
+    }
+
+    func activeUtteranceStateForTesting() -> (
         isRunning: Bool,
         utteranceID: UUID?,
         isTranslating: Bool,
@@ -605,7 +1003,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
     #endif
 
     @discardableResult
-    public func suspendForMicPriority() -> Bool {
+    func suspendForMicPriority() -> Bool {
         // Audio that reaches a suspended channel is stashed in `pendingPCMBuffers`
         // (bounded by `maxSuspendedBuffers`) and replayed on resume. For the mic
         // channel those buffers have already passed the capture engine's
@@ -639,10 +1037,11 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             let (canCommitImmediate, lateCommit, strayTask) = self.lock.withLock { state -> (Bool, PendingCommit?, SFSpeechRecognitionTask?) in
+                let discardValid = (state.discardEpoch == capturedDiscardEpoch)
                 guard state.isRunning,
                       state.resetEpoch == capturedResetEpoch,
-                      state.discardEpoch == capturedDiscardEpoch else {
-                    return (false, nil, nil)
+                      discardValid else {
+                    return (discardValid, nil, nil)
                 }
                 guard state.isSuspended else {
                     return (true, nil, nil)
@@ -658,6 +1057,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                     immediateCommit.original,
                     fallbackTranslated: immediateCommit.fallbackTranslated,
                     fallbackUntranslated: immediateCommit.fallbackUntranslated,
+                    fallbackTranslatedSource: immediateCommit.fallbackTranslatedSource,
                     utteranceID: immediateCommit.utteranceID,
                     sourceLocaleId: immediateCommit.sourceLocaleId,
                     targetLangCode: immediateCommit.targetLangCode
@@ -668,6 +1068,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                     lateCommit.original,
                     fallbackTranslated: lateCommit.fallbackTranslated,
                     fallbackUntranslated: lateCommit.fallbackUntranslated,
+                    fallbackTranslatedSource: lateCommit.fallbackTranslatedSource,
                     utteranceID: lateCommit.utteranceID,
                     sourceLocaleId: lateCommit.sourceLocaleId,
                     targetLangCode: lateCommit.targetLangCode
@@ -679,14 +1080,50 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         return hadActiveReq
     }
 
-    public func resumeAfterMicPriority() {
+    private static func pruneSuspendedEchoBuffers(
+        _ buffers: inout RingBuffer<SendablePCMBuffer>,
+        now: TimeInterval,
+        maxCount: Int,
+        maxGap: TimeInterval,
+        maxAge: TimeInterval
+    ) {
+        guard !buffers.isEmpty else { return }
+        if buffers.count > 1 {
+            var cutIndex = 0
+            var prevArrival: TimeInterval = 0
+            buffers.forEachEnumerated { idx, item in
+                if idx > 0 && (item.arrivalTime - prevArrival) > maxGap {
+                    cutIndex = idx
+                }
+                prevArrival = item.arrivalTime
+            }
+            if cutIndex > 0 {
+                buffers.removeFirst(cutIndex)
+            }
+        }
+        buffers.removeAll { (now - $0.arrivalTime) > maxAge }
+        if buffers.count > maxCount {
+            buffers.removeFirst(buffers.count - maxCount)
+        }
+    }
+
+    func resumeAfterMicPriority() {
         let now = ProcessInfo.processInfo.systemUptime
+        let maxEchoCount = maxSuspendedEchoBuffers
+        let maxEchoGap = maxSuspendedEchoGap
+        let maxEchoAge = maxSuspendedEchoAge
         let needsStart = lock.withLock { state -> Bool in
             guard state.isSuspended else { return false }
             state.isSuspended = false
             state.consecutiveErrors = 0
-            state.pendingPCMBuffers.removeAll { (now - $0.arrivalTime) > 8.0 }
-            let shouldStart = state.isRunning && !state.isStartingSession && !state.isRestartScheduled && state.request == nil && !state.pendingPCMBuffers.isEmpty
+            Self.pruneSuspendedEchoBuffers(
+                &state.pendingPCMBuffers,
+                now: now,
+                maxCount: maxEchoCount,
+                maxGap: maxEchoGap,
+                maxAge: maxEchoAge
+            )
+            let shouldStart = state.isRunning && !state.isStartingSession && !state.isRestartScheduled && !state.isRequestingSpeechAuth && state.request == nil && !state.pendingPCMBuffers.isEmpty
             if shouldStart {
                 state.isRestartScheduled = true
             }
@@ -701,7 +1138,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
     }
 
     @discardableResult
-    public func finishIfIdleForPeerChannel() -> Bool {
+    func finishIfIdleForPeerChannel() -> Bool {
         let now = ProcessInfo.processInfo.systemUptime
         let (shouldClose, oldReq, drainId, pendingCommit) = lock.withLock { state -> (Bool, ManagedRequest?, UInt64?, PendingCommit?) in
             guard state.isRunning, state.request != nil || state.task != nil else {
@@ -726,6 +1163,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 commit.original,
                 fallbackTranslated: commit.fallbackTranslated,
                 fallbackUntranslated: commit.fallbackUntranslated,
+                fallbackTranslatedSource: commit.fallbackTranslatedSource,
                 utteranceID: commit.utteranceID,
                 sourceLocaleId: commit.sourceLocaleId,
                 targetLangCode: commit.targetLangCode
@@ -738,17 +1176,28 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         return true
     }
 
-    public func appendPCMBuffer(_ buffer: AVAudioPCMBuffer, minimumStartDelay: TimeInterval = 0.01) {
+    func appendPCMBuffer(_ buffer: AVAudioPCMBuffer, minimumStartDelay: TimeInterval = 0.01) {
         let now = ProcessInfo.processInfo.systemUptime
         let wrappedBuffer = SendablePCMBuffer(buffer: buffer, arrivalTime: now)
         let maxSusp = maxSuspendedBuffers
+        let maxEchoCount = maxSuspendedEchoBuffers
+        let maxEchoGap = maxSuspendedEchoGap
+        let maxEchoAge = maxSuspendedEchoAge
         let (running, req, shouldCycle, needsStart, needsWatchdog, errCount) = lock.withLock { state -> (Bool, ManagedRequest?, Bool, Bool, Bool, Int) in
             guard state.isRunning else { return (false, nil, false, false, false, 0) }
             if state.isSuspended {
-                if state.pendingPCMBuffers.count >= maxSusp {
-                    state.pendingPCMBuffers.removeFirst()
+                if let last = state.pendingPCMBuffers.last,
+                   (now - last.arrivalTime) > maxEchoGap {
+                    state.pendingPCMBuffers.removeAll(keepingCapacity: true)
                 }
                 state.pendingPCMBuffers.append(wrappedBuffer)
+                Self.pruneSuspendedEchoBuffers(
+                    &state.pendingPCMBuffers,
+                    now: now,
+                    maxCount: maxEchoCount,
+                    maxGap: maxEchoGap,
+                    maxAge: maxEchoAge
+                )
                 return (false, nil, false, false, false, 0)
             }
             state.lastBufferArrivalTime = now
@@ -756,16 +1205,16 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 return (true, nil, false, false, false, 0)
             }
             if state.recentSessionBuffers.count >= 16 {
-                state.recentSessionBuffers.removeFirst()
+                _ = state.recentSessionBuffers.popFirst()
             }
             state.recentSessionBuffers.append(wrappedBuffer)
 
             guard let r = state.request, !state.isStartingSession, !state.isRotationScheduled else {
                 if state.pendingPCMBuffers.count >= maxSusp {
-                    state.pendingPCMBuffers.removeFirst()
+                    _ = state.pendingPCMBuffers.popFirst()
                 }
                 state.pendingPCMBuffers.append(wrappedBuffer)
-                let shouldStart = !state.isStartingSession && !state.isRestartScheduled && state.request == nil
+                let shouldStart = !state.isStartingSession && !state.isRestartScheduled && !state.isRequestingSpeechAuth && state.request == nil
                 if shouldStart {
                     state.isRestartScheduled = true
                 }
@@ -773,7 +1222,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             }
 
             let age = now - state.sessionStartTime
-            if age > 56.0 {
+            if age > 180.0 {
                 // Defer `sessionStartTime` and `isRestartScheduled` mutations until `appendBuffer` succeeds.
                 return (true, r, true, false, false, 0)
             }
@@ -793,8 +1242,16 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                         state.sessionStartTime = now
                         state.isRestartScheduled = true
                         state.isRotationScheduled = true
-                        // Retain boundary frames for the incoming rotated request so active speech isn't clipped.
-                        if state.pendingPCMBuffers.count < maxSusp {
+                        // Retain recent onset frames for the incoming rotated request so active speech isn't clipped.
+                        if state.currentOriginal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            let recent = state.recentSessionBuffers.suffix(4)
+                            for buf in recent {
+                                if state.pendingPCMBuffers.count >= maxSusp {
+                                    _ = state.pendingPCMBuffers.popFirst()
+                                }
+                                state.pendingPCMBuffers.append(buf)
+                            }
+                        } else if state.pendingPCMBuffers.count < maxSusp {
                             state.pendingPCMBuffers.append(wrappedBuffer)
                         }
                         return true
@@ -812,10 +1269,10 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 let fallbackStart = lock.withLock { state -> Bool in
                     guard state.isRunning, !state.isSuspended, state.request == nil else { return false }
                     if state.pendingPCMBuffers.count >= maxSusp {
-                        state.pendingPCMBuffers.removeFirst()
+                        _ = state.pendingPCMBuffers.popFirst()
                     }
                     state.pendingPCMBuffers.append(wrappedBuffer)
-                    let shouldStart = !state.isStartingSession && !state.isRestartScheduled
+                    let shouldStart = !state.isStartingSession && !state.isRestartScheduled && !state.isRequestingSpeechAuth
                     if shouldStart {
                         state.isRestartScheduled = true
                     }
@@ -900,90 +1357,225 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
     }
 
     private func setupRecognizer() {
-        let localeId = lock.withLock { $0.sourceLocaleId }
+        let (isRunningNow, localeId, capturedResetEpoch) = lock.withLock { state -> (Bool, String, UInt64) in
+            (state.isRunning, state.sourceLocaleId, state.resetEpoch)
+        }
+        guard isRunningNow else { return }
+
         let loc = SupportedLanguages.bestLocale(forCode: localeId)
-        if let rec = SFSpeechRecognizer(locale: loc) {
-            lock.withLock { $0.recognizer = rec }
-            AppLog.speech.info("[SpeechChannel \(self.channelName, privacy: .public)] Configured recognizer with locale '\(loc.identifier, privacy: .public)' (supportsOnDevice: \(rec.supportsOnDeviceRecognition, privacy: .public))")
-        } else {
-            let langCode = Self.baseLanguageCode(from: localeId)
-            let langName = SupportedLanguages.item(forCode: langCode)?.name ?? localeId
+        let langCode = Self.baseLanguageCode(from: localeId)
+        let langName = SupportedLanguages.item(forCode: langCode)?.localizedName ?? localeId
+        guard let rec = SFSpeechRecognizer(locale: loc) else {
+            let stillCurrent = lock.withLock { state -> Bool in
+                guard state.isRunning,
+                      state.resetEpoch == capturedResetEpoch,
+                      state.sourceLocaleId == localeId else {
+                    return false
+                }
+                state.recognizer = nil
+                return true
+            }
+            guard stillCurrent else { return }
             AppLog.speech.error("[SpeechChannel \(self.channelName, privacy: .public)] Locale '\(loc.identifier, privacy: .public)' is unsupported by SFSpeechRecognizer.")
-            lock.withLock { $0.recognizer = nil }
-            noteFailure("Speech recognition locale '\(langName)' is not supported by macOS.")
+            noteFailure(
+                kind: .unsupportedLocale,
+                message: AppL10n.format(
+                    "speech.error.unsupported_locale",
+                    fallback: "Speech recognition locale '%@' is not supported by macOS.",
+                    langName
+                ),
+                expectedResetEpoch: capturedResetEpoch
+            )
+            return
+        }
+
+        let stillCurrent = lock.withLock { state -> Bool in
+            guard state.isRunning,
+                  state.resetEpoch == capturedResetEpoch,
+                  state.sourceLocaleId == localeId else {
+                return false
+            }
+            state.recognizer = rec
+            return true
+        }
+        guard stillCurrent else { return }
+
+        AppLog.speech.info("[SpeechChannel \(self.channelName, privacy: .public)] Configured recognizer with locale '\(loc.identifier, privacy: .public)' (supportsOnDevice: \(rec.supportsOnDeviceRecognition, privacy: .public))")
+
+        let authStatus = SFSpeechRecognizer.authorizationStatus()
+        if authStatus == .denied || authStatus == .restricted {
+            noteFailure(
+                kind: .speechPermissionDenied,
+                message: AppL10n.string(
+                    "speech.error.access_required",
+                    fallback: "Speech Recognition access required"
+                ),
+                expectedResetEpoch: capturedResetEpoch
+            )
+        } else if authStatus == .authorized && !rec.supportsOnDeviceRecognition {
+            noteFailure(
+                kind: .dictationAssetRequired,
+                message: AppL10n.format(
+                    "speech.error.dictation_required",
+                    fallback: "Dictation language required: %@",
+                    langName
+                ),
+                expectedResetEpoch: capturedResetEpoch
+            )
         }
     }
 
-    public func startNewSession(forceReplace: Bool = false) {
+    func startNewSession(forceReplace: Bool = false) {
         let startToken = UUID()
-        let canStart = lock.withLock { state -> Bool in
+        let (canStart, capturedResetEpoch) = lock.withLock { state -> (Bool, UInt64) in
             state.restartWorkItem?.item.cancel()
             state.restartWorkItem = nil
             state.isRestartScheduled = false
             state.isRotationScheduled = false
-            guard state.isRunning, !state.isSuspended, state.sessionStartToken == nil else { return false }
+            guard state.isRunning,
+                  !state.isSuspended,
+                  !state.isRequestingSpeechAuth,
+                  state.sessionStartToken == nil else {
+                return (false, state.resetEpoch)
+            }
             if !forceReplace && state.request != nil {
-                return false
+                return (false, state.resetEpoch)
             }
             if state.request == nil && state.pendingPCMBuffers.isEmpty && !(forceReplace && !state.recentSessionBuffers.isEmpty) {
-                return false
+                return (false, state.resetEpoch)
             }
             state.sessionStartToken = startToken
             state.silenceCommitWorkItem?.item.cancel()
             state.silenceCommitWorkItem = nil
-            return true
+            state.noBufferWatchdogWorkItem?.item.cancel()
+            state.noBufferWatchdogWorkItem = nil
+            return (true, state.resetEpoch)
         }
         guard canStart else { return }
         defer {
-            lock.withLock { state in
+            let shouldSchedulePendingRestart = lock.withLock { state -> Bool in
                 if state.sessionStartToken == startToken {
                     state.sessionStartToken = nil
+                }
+                let now = ProcessInfo.processInfo.systemUptime
+                let inBackoff = state.failureBackoffUntil > now
+                let shouldRetry = state.isRunning
+                    && !state.isSuspended
+                    && !state.isStartingSession
+                    && !state.isRestartScheduled
+                    && !state.isRequestingSpeechAuth
+                    && !inBackoff
+                    && state.request == nil
+                    && !state.pendingPCMBuffers.isEmpty
+                if shouldRetry {
+                    state.isRestartScheduled = true
+                }
+                return shouldRetry
+            }
+            if shouldSchedulePendingRestart {
+                DispatchQueue.main.async { [weak self] in
+                    self?.scheduleRestart(after: 0.03, forceReplace: false)
                 }
             }
         }
 
         let authStatus = SFSpeechRecognizer.authorizationStatus()
         if authStatus == .notDetermined {
-            SFSpeechRecognizer.requestAuthorization { [weak self] status in
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-                    if status == .authorized {
-                        self.scheduleRestart(after: 0.05, forceReplace: false)
-                    } else {
-                        self.noteFailure("Speech Recognition access required")
+            let shouldRequest = lock.withLock { state -> Bool in
+                guard !state.isRequestingSpeechAuth else { return false }
+                state.isRequestingSpeechAuth = true
+                return true
+            }
+            if shouldRequest {
+                SFSpeechRecognizer.requestAuthorization { [weak self] status in
+                    DispatchQueue.main.async {
+                        guard let self = self else { return }
+                        self.lock.withLock { $0.isRequestingSpeechAuth = false }
+                        if status == .authorized {
+                            if self.isRunning {
+                                self.scheduleRestart(after: 0.05, forceReplace: false)
+                            }
+                        } else {
+                            self.noteFailure(
+                                kind: .speechPermissionDenied,
+                                message: AppL10n.string(
+                                    "speech.error.access_required",
+                                    fallback: "Speech Recognition access required"
+                                )
+                            )
+                        }
                     }
                 }
             }
             return
         } else if authStatus == .denied || authStatus == .restricted {
-            noteFailure("Speech Recognition access required")
+            noteFailure(
+                kind: .speechPermissionDenied,
+                message: AppL10n.string(
+                    "speech.error.access_required",
+                    fallback: "Speech Recognition access required"
+                ),
+                expectedResetEpoch: capturedResetEpoch
+            )
             return
         }
 
-        if lock.withLock({ $0.recognizer == nil || $0.recognizer?.supportsOnDeviceRecognition == false }) {
+        let needsSetup = lock.withLock { state -> Bool in
+            guard state.isRunning, state.resetEpoch == capturedResetEpoch else { return false }
+            return state.recognizer == nil || state.recognizer?.supportsOnDeviceRecognition == false
+        }
+        if needsSetup {
             setupRecognizer()
         }
-        let (recognizer, localeId, inBackoff) = lock.withLock { state -> (SFSpeechRecognizer?, String, Bool) in
+        let (stillCurrentEpoch, recognizer, localeId, inBackoff) = lock.withLock { state -> (Bool, SFSpeechRecognizer?, String, Bool) in
+            guard state.isRunning, state.resetEpoch == capturedResetEpoch else {
+                return (false, nil, state.sourceLocaleId, false)
+            }
             let backoff = state.failureBackoffUntil > ProcessInfo.processInfo.systemUptime
-            return (state.recognizer, state.sourceLocaleId, backoff)
+            return (true, state.recognizer, state.sourceLocaleId, backoff)
         }
-        guard let recognizer = recognizer else { return }
+        guard stillCurrentEpoch, let recognizer = recognizer else { return }
 
         let langCode = Self.baseLanguageCode(from: localeId)
-        let langName = SupportedLanguages.item(forCode: langCode)?.name ?? localeId
+        let langName = SupportedLanguages.item(forCode: langCode)?.localizedName ?? localeId
 
         if inBackoff {
             return
         }
 
-        guard recognizer.isAvailable && recognizer.supportsOnDeviceRecognition else {
-            noteFailure("Dictation language required: \(langName)")
+        guard recognizer.supportsOnDeviceRecognition else {
+            noteFailure(
+                kind: .dictationAssetRequired,
+                message: AppL10n.format(
+                    "speech.error.dictation_required",
+                    fallback: "Dictation language required: %@",
+                    langName
+                ),
+                expectedResetEpoch: capturedResetEpoch
+            )
             return
         }
 
-        let (oldReq, oldTask, drainId, pendingCommit) = lock.withLock { state -> (ManagedRequest?, SFSpeechRecognitionTask?, UInt64?, PendingCommit?) in
+        guard recognizer.isAvailable else {
+            noteFailure(
+                kind: .recognitionError,
+                message: AppL10n.format(
+                    "speech.error.unavailable",
+                    fallback: "Speech recognition for %@ is temporarily unavailable. Try again in a moment.",
+                    langName
+                ),
+                expectedResetEpoch: capturedResetEpoch
+            )
+            return
+        }
+
+        let (canRetire, oldReq, oldTask, drainId, pendingCommit) = lock.withLock { state -> (Bool, ManagedRequest?, SFSpeechRecognitionTask?, UInt64?, PendingCommit?) in
+            guard state.isRunning, !state.isSuspended, state.resetEpoch == capturedResetEpoch else {
+                return (false, nil, nil, nil, nil)
+            }
             let r = state.request
             state.request = nil
+            state.sessionTaskId &+= 1
             let hasText = !state.currentOriginal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let willReplayRecent = forceReplace && !hasText && state.pendingPCMBuffers.isEmpty && !state.recentSessionBuffers.isEmpty
             if willReplayRecent {
@@ -992,12 +1584,16 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 let commit = Self.consumePendingCommit(&state)
                 let t = state.task
                 state.task = nil
-                state.pendingPCMBuffers = Array(state.recentSessionBuffers.suffix(8))
-                return (r, t, nil, commit)
+                state.pendingPCMBuffers.removeAll(keepingCapacity: true)
+                for buf in state.recentSessionBuffers.suffix(8) {
+                    state.pendingPCMBuffers.append(buf)
+                }
+                return (true, r, t, nil, commit)
             }
             let (drainId, commit) = Self.retireTaskForDraining(&state)
-            return (r, nil, drainId, commit)
+            return (true, r, nil, drainId, commit)
         }
+        guard canRetire else { return }
 
         endManagedRequest(oldReq)
         oldTask?.cancel()
@@ -1010,6 +1606,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 commit.original,
                 fallbackTranslated: commit.fallbackTranslated,
                 fallbackUntranslated: commit.fallbackUntranslated,
+                fallbackTranslatedSource: commit.fallbackTranslatedSource,
                 utteranceID: commit.utteranceID,
                 sourceLocaleId: commit.sourceLocaleId,
                 targetLangCode: commit.targetLangCode
@@ -1024,12 +1621,12 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         let managedNewReq = ManagedRequest(newReq)
 
         let (shouldProceed, stashedPCMs, currentTaskSession) = lock.withLock { state -> (Bool, [SendablePCMBuffer], UInt64) in
-            guard state.isRunning, !state.isSuspended else {
+            guard state.isRunning, !state.isSuspended, state.resetEpoch == capturedResetEpoch else {
                 return (false, [], state.sessionTaskId)
             }
             let now = ProcessInfo.processInfo.systemUptime
             state.pendingPCMBuffers.removeAll { (now - $0.arrivalTime) > 8.0 }
-            let pcms = state.pendingPCMBuffers
+            let pcms = state.pendingPCMBuffers.toArray()
             state.pendingPCMBuffers.removeAll(keepingCapacity: true)
             state.sessionTaskId &+= 1
             return (true, pcms, state.sessionTaskId)
@@ -1069,14 +1666,15 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 if let nsError = nsError {
                     let knownCode = SpeechRecognitionErrorCode(rawValue: nsError.code)
                     let now = ProcessInfo.processInfo.systemUptime
-                    let (errCount, hasPending, isSusp, isRunningNow, hasPendingText) = self.lock.withLock { state -> (Int, Bool, Bool, Bool, Bool) in
+                    let (oldReq, errCount, hasPending, isSusp, isRunningNow, hasPendingText) = self.lock.withLock { state -> (ManagedRequest?, Int, Bool, Bool, Bool, Bool) in
+                        let r = state.request
                         state.request = nil
                         state.task = nil
                         state.noBufferWatchdogWorkItem?.item.cancel()
                         state.noBufferWatchdogWorkItem = nil
                         if state.isSuspended {
                             state.recentSessionBuffers.removeAll(keepingCapacity: true)
-                            return (0, false, true, state.isRunning, false)
+                            return (r, 0, false, true, state.isRunning, false)
                         }
                         state.consecutiveErrors += 1
                         let recentlyActive = (now - state.lastBufferArrivalTime) < 0.65
@@ -1085,8 +1683,9 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                         }
                         state.recentSessionBuffers.removeAll(keepingCapacity: true)
                         let hasOrig = !state.currentOriginal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        return (state.consecutiveErrors, !state.pendingPCMBuffers.isEmpty, false, state.isRunning, hasOrig)
+                        return (r, state.consecutiveErrors, !state.pendingPCMBuffers.isEmpty, false, state.isRunning, hasOrig)
                     }
+                    self.endManagedRequest(oldReq)
 
                     if isSusp { return }
 
@@ -1094,27 +1693,63 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                     case .notAuthorizedOrMissingAsset:
                         let currentAuth = SFSpeechRecognizer.authorizationStatus()
                         if currentAuth == .notDetermined {
-                            SFSpeechRecognizer.requestAuthorization { [weak self] status in
-                                DispatchQueue.main.async {
-                                    guard let self = self else { return }
-                                    if status == .authorized && self.isRunning {
-                                        self.scheduleRestart(after: 0.1, forceReplace: false)
-                                    } else if status != .authorized {
-                                        self.noteFailure("Speech Recognition access required")
+                            let shouldRequest = self.lock.withLock { state -> Bool in
+                                guard !state.isRequestingSpeechAuth else { return false }
+                                state.isRequestingSpeechAuth = true
+                                return true
+                            }
+                            if shouldRequest {
+                                SFSpeechRecognizer.requestAuthorization { [weak self] status in
+                                    DispatchQueue.main.async {
+                                        guard let self = self else { return }
+                                        self.lock.withLock { $0.isRequestingSpeechAuth = false }
+                                        if status == .authorized && self.isRunning {
+                                            self.scheduleRestart(after: 0.1, forceReplace: false)
+                                        } else if status != .authorized {
+                                            self.noteFailure(
+                                                kind: .speechPermissionDenied,
+                                                message: AppL10n.string(
+                                                    "speech.error.access_required",
+                                                    fallback: "Speech Recognition access required"
+                                                )
+                                            )
+                                        }
                                     }
                                 }
                             }
                         } else if currentAuth == .denied || currentAuth == .restricted {
-                            self.noteFailure("Speech Recognition access required")
+                            self.noteFailure(
+                                kind: .speechPermissionDenied,
+                                message: AppL10n.string(
+                                    "speech.error.access_required",
+                                    fallback: "Speech Recognition access required"
+                                ),
+                                expectedResetEpoch: capturedResetEpoch
+                            )
                         } else {
                             let langCode = Self.baseLanguageCode(from: taskLocaleId)
-                            let langName = SupportedLanguages.item(forCode: langCode)?.name ?? taskLocaleId
-                            self.noteFailure("Dictation language required: \(langName)")
+                            let langName = SupportedLanguages.item(forCode: langCode)?.localizedName ?? taskLocaleId
+                            self.noteFailure(
+                                kind: .dictationAssetRequired,
+                                message: AppL10n.format(
+                                    "speech.error.dictation_required",
+                                    fallback: "Dictation language required: %@",
+                                    langName
+                                ),
+                                expectedResetEpoch: capturedResetEpoch
+                            )
                         }
                         return
 
                     case .dictationDisabled:
-                        self.noteFailure("Dictation is disabled in System Settings")
+                        self.noteFailure(
+                            kind: .dictationDisabled,
+                            message: AppL10n.string(
+                                "speech.error.dictation_disabled",
+                                fallback: "Dictation is disabled in System Settings"
+                            ),
+                            expectedResetEpoch: capturedResetEpoch
+                        )
                         return
 
                     case .cancelled, .requestCancelled:
@@ -1141,7 +1776,15 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                             self.closeCurrentSession()
                         }
                         if errCount >= 3 {
-                            self.noteFailure("Speech recognition error: \(nsError.localizedDescription)")
+                            self.noteFailure(
+                                kind: .recognitionError,
+                                message: AppL10n.format(
+                                    "speech.error.generic",
+                                    fallback: "Speech recognition error: %@",
+                                    nsError.localizedDescription
+                                ),
+                                expectedResetEpoch: capturedResetEpoch
+                            )
                         }
                         let delay = min(1.5, 0.20 * Double(errCount))
                         if isRunningNow && hasPending {
@@ -1152,12 +1795,24 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 }
 
                 guard let text = text else { return }
-                self.lock.withLock {
-                    $0.consecutiveErrors = 0
-                    $0.failureCount = 0
-                    $0.failureBackoffUntil = 0
-                    $0.lastReportedFailure = nil
-                    $0.lastFailureReportTime = 0
+                let shouldNotifyAuthHealthy = self.lock.withLock { state -> Bool in
+                    let needsNotify = state.consecutiveErrors > 0
+                        || state.failureCount > 0
+                        || state.lastReportedFailure != nil
+                        || state.lastFailureKind != nil
+                        || !state.hasReportedAuthHealthy
+                    state.consecutiveErrors = 0
+                    state.failureCount = 0
+                    state.failureBackoffUntil = 0
+                    state.lastReportedFailure = nil
+                    state.lastFailureReportTime = 0
+                    state.lastFailureKind = nil
+                    state.hasReportedAuthHealthy = true
+                    return needsNotify
+                }
+                if shouldNotifyAuthHealthy {
+                    self.onAuthSuccess?()
+                    self.onAuthSuccessWithChannel?(self.channelName)
                 }
                 self.processRecognizedSessionText(text, isFinal: isFinal)
             }
@@ -1166,12 +1821,15 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         // Flush any buffers that arrived while recognitionTask was spinning up and publish
         // `state.request` atomically with `state.task`. Maintain strict lock order: lock -> requestIOLock.
         let shouldCancelNewTask = lock.withLock { state -> Bool in
-            guard state.isRunning, !state.isSuspended, state.sessionTaskId == currentTaskSession else {
+            guard state.isRunning,
+                  !state.isSuspended,
+                  state.resetEpoch == capturedResetEpoch,
+                  state.sessionTaskId == currentTaskSession else {
                 return true
             }
             let now = ProcessInfo.processInfo.systemUptime
             state.pendingPCMBuffers.removeAll { (now - $0.arrivalTime) > 8.0 }
-            let extraPCMs = state.pendingPCMBuffers
+            let extraPCMs = state.pendingPCMBuffers.toArray()
             state.pendingPCMBuffers.removeAll(keepingCapacity: true)
             if !extraPCMs.isEmpty {
                 requestIOLock.lock()
@@ -1197,20 +1855,18 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             return
         }
 
-        scheduleNoBufferWatchdog(after: noBufferIdleTimeout, force: false)
-
-        let chName = channelName
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.onAuthSuccess?()
-            self.onAuthSuccessWithChannel?(chName)
-        }
+        scheduleNoBufferWatchdog(after: noBufferIdleTimeout, force: true)
     }
 
-    private func noteFailure(_ message: String) {
+    private func noteFailure(kind: SpeechAuthIssueKind, message: String, expectedResetEpoch: UInt64? = nil) {
         let now = ProcessInfo.processInfo.systemUptime
-        let shouldReport = lock.withLock { state -> Bool in
+        let (isValid, shouldReport) = lock.withLock { state -> (Bool, Bool) in
+            if let expectedResetEpoch, (!state.isRunning || state.resetEpoch != expectedResetEpoch) {
+                return (false, false)
+            }
             state.failureCount += 1
+            state.lastFailureKind = kind
+            state.hasReportedAuthHealthy = false
             let exponent = min(5, max(1, state.failureCount))
             let delays: [TimeInterval] = [2, 5, 15, 60, 300, 300]
             state.failureBackoffUntil = now + delays[exponent - 1]
@@ -1220,12 +1876,17 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 state.lastReportedFailure = message
                 state.lastFailureReportTime = now
             }
-            return report
+            return (true, report)
         }
+        guard isValid else { return }
         AppLog.speech.warning("[SpeechChannel \(self.channelName, privacy: .public)] \(message, privacy: .public)")
         if shouldReport {
             onAuthError?(message)
-            onAuthErrorWithChannel?(channelName, message)
+            if let onIssueWithChannel {
+                onIssueWithChannel(channelName, kind, message)
+            } else {
+                onAuthErrorWithChannel?(channelName, message)
+            }
         }
     }
 
@@ -1270,32 +1931,54 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         return pauseCommitInterval
     }
 
-    private func scheduleSilenceCommit(for text: String) {
-        let timeout = dynamicPauseCommitInterval(for: text)
-        scheduleSilenceCommitAfter(delay: timeout, requiredIdle: timeout)
-    }
-
-    private func scheduleSilenceCommitAfter(delay: TimeInterval, requiredIdle: TimeInterval) {
+    private func scheduleSilenceCommitIfNeeded(delay: TimeInterval, force: Bool = false) {
         let work = SendableWorkItem(item: DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            let (isRunningNow, lastActivity) = self.lock.withLock { state -> (Bool, TimeInterval) in
+            let (isRunningNow, lastActivity, lastBufferTime, requiredIdle) = self.lock.withLock { state -> (Bool, TimeInterval, TimeInterval, TimeInterval) in
                 state.silenceCommitWorkItem = nil
-                return (state.isRunning, state.lastSpeechActivityTime)
+                return (state.isRunning, state.lastSpeechActivityTime, state.lastBufferArrivalTime, state.requiredSilenceIdle)
             }
             guard isRunningNow else { return }
-            let textIdle = ProcessInfo.processInfo.systemUptime - lastActivity
+            let now = ProcessInfo.processInfo.systemUptime
+            let textIdle = now - lastActivity
             if textIdle < (requiredIdle - 0.08) {
                 let remaining = max(0.15, requiredIdle - textIdle)
-                self.scheduleSilenceCommitAfter(delay: remaining, requiredIdle: requiredIdle)
+                self.scheduleSilenceCommitIfNeeded(delay: remaining, force: true)
+                return
+            }
+            let minBufferIdle = self.noBufferIdleTimeout * 0.85
+            let bufferIdle = now - lastBufferTime
+            if lastBufferTime > 0 && bufferIdle < minBufferIdle {
+                let remaining = max(0.15, minBufferIdle - bufferIdle)
+                self.scheduleSilenceCommitIfNeeded(delay: remaining, force: true)
                 return
             }
             self.commitSilenceThought()
         })
-        lock.withLock { state in
+        let scheduled = lock.withLock { state -> Bool in
+            guard state.isRunning else { return false }
+            if !force && state.silenceCommitWorkItem != nil {
+                return false
+            }
             state.silenceCommitWorkItem?.item.cancel()
             state.silenceCommitWorkItem = work
+            return true
         }
+        guard scheduled else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work.item)
+    }
+
+    private static func containsCJKCharacters(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            let v = scalar.value
+            if (0x4E00...0x9FFF).contains(v)
+                || (0x3400...0x4DBF).contains(v)
+                || (0x3040...0x30FF).contains(v)
+                || (0xAC00...0xD7AF).contains(v) {
+                return true
+            }
+        }
+        return false
     }
 
     private func processRecognizedSessionText(_ rawFullText: String, isFinal: Bool) {
@@ -1314,6 +1997,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             return
         }
 
+        let silenceInterval = isFinal ? pauseCommitInterval : dynamicPauseCommitInterval(for: trimmedFull)
         let now = ProcessInfo.processInfo.systemUptime
         let outcome = lock.withLock { state -> (
             shouldProcess: Bool,
@@ -1323,10 +2007,11 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             displayUntranslated: Bool,
             isSameLanguage: Bool,
             uiSourceCode: String,
-            uiTargetCode: String
+            uiTargetCode: String,
+            needsSilenceTimer: Bool
         ) in
             if trimmedFull == state.lastRawFullText && !isFinal {
-                return (false, nil, UUID(), "", false, false, "", "")
+                return (false, nil, UUID(), "", false, false, "", "", false)
             }
 
             if state.currentUtteranceID == nil {
@@ -1336,31 +2021,36 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             var shrunkCommit: PendingCommit? = nil
             let prevOrig = state.currentOriginal.trimmingCharacters(in: .whitespacesAndNewlines)
             if !prevOrig.isEmpty {
-                let prevWords = prevOrig.split(whereSeparator: { $0.isWhitespace })
-                let newWords = trimmedFull.split(whereSeparator: { $0.isWhitespace })
-                let isPrefixShrink = prevOrig.lowercased().hasPrefix(trimmedFull.lowercased())
-                let isITNRewrite = Self.isLikelyInverseTextNormalization(previous: prevOrig, updated: trimmedFull)
-                let isDramaticShrink = !isITNRewrite && (prevOrig.count >= 8 && (
-                    (!isPrefixShrink && (trimmedFull.count * 2 <= prevOrig.count || (prevOrig.count - trimmedFull.count >= 12 && newWords.count + 2 <= prevWords.count))) ||
-                    (prevWords.count >= 4 && newWords.count <= 1 && prevOrig.count - trimmedFull.count >= 14)
-                ))
-                if isDramaticShrink {
-                    shrunkCommit = PendingCommit(
-                        utteranceID: state.currentUtteranceID ?? UUID(),
-                        original: prevOrig,
-                        fallbackTranslated: state.currentTranslated,
-                        fallbackUntranslated: state.currentIsUntranslated,
-                        sourceLocaleId: state.sourceLocaleId,
-                        targetLangCode: state.targetLangCode
-                    )
-                    state.currentUtteranceID = nil
-                    state.currentOriginal = ""
-                    state.currentTranslated = ""
-                    state.currentIsUntranslated = false
-                    state.pendingTailText = nil
-                    state.isTranslating = false
-                    state.activeTranslationTaskId = nil
-                    state.sessionEpoch &+= 1
+                let prevLen = prevOrig.count
+                let newLen = trimmedFull.count
+                // Short-circuit before splitting/lowercasing/ITN scanning on growing or mildly revised partials (>99% of callbacks).
+                if prevLen >= 4 && (newLen * 2 <= prevLen || prevLen - newLen >= 12) {
+                    let srcBase = Self.baseLanguageCode(from: state.sourceLocaleId)
+                    let isCJK = srcBase == "zh" || srcBase == "ja" || srcBase == "ko" || Self.containsCJKCharacters(prevOrig)
+                    let minShrinkLen = isCJK ? 4 : 8
+                    if prevLen >= minShrinkLen {
+                        let prevWords = prevOrig.split(whereSeparator: { $0.isWhitespace })
+                        let newWords = trimmedFull.split(whereSeparator: { $0.isWhitespace })
+                        let rawPrefixShrink = prevOrig.lowercased().hasPrefix(trimmedFull.lowercased())
+                        let isSevereCollapse = prevLen >= 20 && newLen * 3 <= prevLen
+                        let isPrefixShrink = rawPrefixShrink && !isSevereCollapse
+                        let candidateDramaticShrink =
+                            (!isPrefixShrink && (newLen * 2 <= prevLen || (prevLen - newLen >= 12 && newWords.count + 2 <= prevWords.count))) ||
+                            (prevWords.count >= 4 && newWords.count <= 1 && prevLen - newLen >= 14)
+                        if candidateDramaticShrink && !Self.isLikelyInverseTextNormalization(previous: prevOrig, updated: trimmedFull) {
+                            shrunkCommit = PendingCommit(
+                                utteranceID: state.currentUtteranceID ?? UUID(),
+                                original: prevOrig,
+                                fallbackTranslated: state.currentTranslated,
+                                fallbackUntranslated: state.currentIsUntranslated,
+                                fallbackTranslatedSource: state.currentTranslatedSourceText,
+                                sourceLocaleId: state.sourceLocaleId,
+                                targetLangCode: state.targetLangCode
+                            )
+                            Self.resetSessionTrackingState(&state)
+                            state.sessionEpoch &+= 1
+                        }
+                    }
                 }
             }
 
@@ -1380,6 +2070,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             let displayUntranslated: Bool
             if isSameLanguage {
                 state.currentTranslated = trimmedFull
+                state.currentTranslatedSourceText = trimmedFull
                 state.currentIsUntranslated = false
                 displayTrans = trimmedFull
                 displayUntranslated = false
@@ -1391,10 +2082,17 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 }
             }
 
-            state.silenceCommitWorkItem?.item.cancel()
-            state.silenceCommitWorkItem = nil
+            let needsSilenceTimer: Bool
+            if isFinal {
+                state.silenceCommitWorkItem?.item.cancel()
+                state.silenceCommitWorkItem = nil
+                needsSilenceTimer = false
+            } else {
+                state.requiredSilenceIdle = silenceInterval
+                needsSilenceTimer = (state.silenceCommitWorkItem == nil)
+            }
 
-            return (true, shrunkCommit, utteranceID, displayTrans, displayUntranslated, isSameLanguage, uiSrc, uiTgt)
+            return (true, shrunkCommit, utteranceID, displayTrans, displayUntranslated, isSameLanguage, uiSrc, uiTgt, needsSilenceTimer)
         }
 
         guard outcome.shouldProcess else { return }
@@ -1404,6 +2102,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 shrunkCommit.original,
                 fallbackTranslated: shrunkCommit.fallbackTranslated,
                 fallbackUntranslated: shrunkCommit.fallbackUntranslated,
+                fallbackTranslatedSource: shrunkCommit.fallbackTranslatedSource,
                 utteranceID: shrunkCommit.utteranceID,
                 sourceLocaleId: shrunkCommit.sourceLocaleId,
                 targetLangCode: shrunkCommit.targetLangCode
@@ -1427,55 +2126,249 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             if !outcome.isSameLanguage {
                 pumpTranslationLoop(utteranceID: outcome.utteranceID)
             }
-            scheduleSilenceCommit(for: trimmedFull)
+            if outcome.needsSilenceTimer {
+                scheduleSilenceCommitIfNeeded(delay: silenceInterval, force: false)
+            }
         }
     }
 
+    private static let cjkNumberScalars: Set<UnicodeScalar> = [
+        "零", "〇", "一", "二", "两", "兩", "三", "四", "五", "六", "七", "八", "九", "十", "百", "千", "万", "萬", "亿", "億", "兆"
+    ]
+
     private static func isLikelyInverseTextNormalization(previous: String, updated: String) -> Bool {
+        let isKana: (UnicodeScalar) -> Bool = {
+            (0x3040...0x309F).contains($0.value) || (0x30A0...0x30FF).contains($0.value) || (0xFF65...0xFF9F).contains($0.value)
+        }
+        let isKanji: (UnicodeScalar) -> Bool = {
+            (0x4E00...0x9FFF).contains($0.value) || (0x3400...0x4DBF).contains($0.value)
+        }
+
+        // 1. Japanese kana -> kanji conversion rewrite (e.g., hiragana/katakana contracting into CJK Unified Ideographs)
+        let prevKana = previous.unicodeScalars.filter(isKana).count
+        let newKana = updated.unicodeScalars.filter(isKana).count
+        let prevKanji = previous.unicodeScalars.filter(isKanji).count
+        let newKanji = updated.unicodeScalars.filter(isKanji).count
+        if newKanji > prevKanji && prevKana > 0 && newKana < prevKana {
+            return true
+        }
+
+        // 2. All-caps acronym contraction (e.g., "United States of America" -> "USA", "artificial intelligence" -> "AI")
+        let prevRawTokens = previous
+            .split(whereSeparator: { $0.isWhitespace || $0.isPunctuation })
+            .map(String.init)
+        let newRawTokens = updated
+            .split(whereSeparator: { $0.isWhitespace || $0.isPunctuation })
+            .map(String.init)
+        let prevRawSet = Set(prevRawTokens)
+        let hasNewAcronym = newRawTokens.contains { token in
+            guard !prevRawSet.contains(token) else { return false }
+            let letterScalars = token.unicodeScalars.filter { CharacterSet.letters.contains($0) }
+            guard letterScalars.count >= 2 else { return false }
+            return letterScalars.allSatisfy { CharacterSet.uppercaseLetters.contains($0) }
+                && token.unicodeScalars.allSatisfy { CharacterSet.uppercaseLetters.contains($0) || CharacterSet.decimalDigits.contains($0) }
+        }
+        if hasNewAcronym && (prevRawTokens.count > newRawTokens.count || previous.count > updated.count) {
+            return true
+        }
+
+        // 3. Spoken number words -> digits ITN
         let prevDigits = previous.unicodeScalars.filter { CharacterSet.decimalDigits.contains($0) }.count
         let newDigits = updated.unicodeScalars.filter { CharacterSet.decimalDigits.contains($0) }.count
         guard newDigits > prevDigits, newDigits > 0 else { return false }
 
-        let prevWords = previous.lowercased()
+        let prevCJKNums = previous.unicodeScalars.filter { cjkNumberScalars.contains($0) }.count
+        let newCJKNums = updated.unicodeScalars.filter { cjkNumberScalars.contains($0) }.count
+        if prevCJKNums > newCJKNums {
+            return true
+        }
+
+        let fold: (String) -> String = {
+            $0.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+        }
+        let prevWords = fold(previous)
             .split(whereSeparator: { $0.isWhitespace || $0.isPunctuation })
             .map(String.init)
-        let newWords = updated.lowercased()
+        let newWords = fold(updated)
             .split(whereSeparator: { $0.isWhitespace || $0.isPunctuation })
             .map(String.init)
 
         let spokenCount = prevWords.filter { spokenNumberWords.contains($0) }.count
-        if spokenCount >= 2 {
+        if spokenCount >= 2 || (spokenCount >= 1 && newDigits >= 2) {
             return true
         }
         if let firstPrev = prevWords.first, let firstNew = newWords.first, firstPrev == firstNew {
             return true
         }
+        let prevNonNumeric = Set(prevWords.filter { $0.unicodeScalars.allSatisfy { !CharacterSet.decimalDigits.contains($0) } })
+        let hasSharedNonNumericWord = newWords.contains {
+            !$0.isEmpty && $0.unicodeScalars.allSatisfy { !CharacterSet.decimalDigits.contains($0) } && prevNonNumeric.contains($0)
+        }
+        if hasSharedNonNumericWord && newDigits >= 2 {
+            return true
+        }
         return false
     }
 
-    private func pumpTranslationLoop(utteranceID: UUID) {
-        let taskId = UUID()
-        let pumpParams = lock.withLock { state -> (String, String, String, String, String, UInt64, UInt64, UInt64)? in
-            guard !state.isTranslating else { return nil }
-            guard let textToTranslate = state.pendingTailText, !textToTranslate.isEmpty else { return nil }
+    private enum PumpDecision: Sendable {
+        case skip
+        case throttle(delay: TimeInterval, work: SendableWorkItem)
+        case start(
+            taskId: UUID,
+            text: String,
+            sourceLocaleId: String,
+            targetLangCode: String,
+            sessionEpoch: UInt64,
+            resetEpoch: UInt64,
+            discardEpoch: UInt64
+        )
+    }
+
+    private func isPartialTranslationStillCurrent(
+        taskId: UUID,
+        utteranceID: UUID,
+        sessionEpoch: UInt64,
+        resetEpoch: UInt64,
+        discardEpoch: UInt64
+    ) -> Bool {
+        lock.withLock { state in
+            state.isRunning
+                && state.activeTranslationTaskId == taskId
+                && state.currentUtteranceID == utteranceID
+                && state.sessionEpoch == sessionEpoch
+                && state.resetEpoch == resetEpoch
+                && state.discardEpoch == discardEpoch
+        }
+    }
+
+    private func pumpTranslationLoop(utteranceID: UUID, bypassThrottle: Bool = false) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let candidateTaskId = UUID()
+        let decision = lock.withLock { state -> PumpDecision in
+            guard state.isRunning,
+                  state.currentUtteranceID == utteranceID,
+                  !state.isTranslating else {
+                return .skip
+            }
+            guard let textToTranslate = state.pendingTailText, !textToTranslate.isEmpty else {
+                return .skip
+            }
+            let trimmedCandidate = textToTranslate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedCandidate == state.currentTranslatedSourceText && !state.currentTranslated.isEmpty && !state.currentIsUntranslated {
+                state.pendingTailText = nil
+                return .skip
+            }
+            let throttleInterval: TimeInterval
+            if trimmedCandidate.count > 280 {
+                throttleInterval = 0.40
+            } else if trimmedCandidate.count > 120 {
+                throttleInterval = 0.28
+            } else {
+                throttleInterval = Self.partialTranslationThrottleInterval
+            }
+            if !bypassThrottle && state.lastPartialTranslationStartTime > 0 {
+                let elapsed = now - state.lastPartialTranslationStartTime
+                if elapsed < throttleInterval {
+                    if state.partialThrottleWorkItem != nil {
+                        return .skip
+                    }
+                    let delay = max(0.01, throttleInterval - elapsed)
+                    let capturedEpoch = state.sessionEpoch
+                    let capturedResetEpoch = state.resetEpoch
+                    let capturedDiscardEpoch = state.discardEpoch
+                    let throttleWork = SendableWorkItem(item: DispatchWorkItem { [weak self] in
+                        guard let self = self else { return }
+                        let shouldPump = self.lock.withLock { s -> Bool in
+                            s.partialThrottleWorkItem = nil
+                            return s.isRunning
+                                && s.sessionEpoch == capturedEpoch
+                                && s.resetEpoch == capturedResetEpoch
+                                && s.discardEpoch == capturedDiscardEpoch
+                                && s.currentUtteranceID == utteranceID
+                        }
+                        if shouldPump {
+                            self.pumpTranslationLoop(utteranceID: utteranceID, bypassThrottle: true)
+                        }
+                    })
+                    state.partialThrottleWorkItem = throttleWork
+                    return .throttle(delay: delay, work: throttleWork)
+                }
+            }
+            state.partialThrottleWorkItem?.item.cancel()
+            state.partialThrottleWorkItem = nil
             state.pendingTailText = nil
             state.isTranslating = true
-            state.activeTranslationTaskId = taskId
-            let transSrc = Self.translationLanguageCode(from: state.sourceLocaleId)
-            let transTgt = Self.translationLanguageCode(from: state.targetLangCode, resolveBareChinese: true)
-            let uiSrc = Self.baseLanguageCode(from: state.sourceLocaleId)
-            let uiTgt = Self.baseLanguageCode(from: state.targetLangCode)
-            return (textToTranslate, transSrc, transTgt, uiSrc, uiTgt, state.sessionEpoch, state.resetEpoch, state.discardEpoch)
+            state.activeTranslationTaskId = candidateTaskId
+            state.lastPartialTranslationStartTime = now
+            return .start(
+                taskId: candidateTaskId,
+                text: textToTranslate,
+                sourceLocaleId: state.sourceLocaleId,
+                targetLangCode: state.targetLangCode,
+                sessionEpoch: state.sessionEpoch,
+                resetEpoch: state.resetEpoch,
+                discardEpoch: state.discardEpoch
+            )
         }
-        guard let (textToTranslate, transSrc, transTgt, uiSrc, uiTgt, capturedEpoch, capturedResetEpoch, capturedDiscardEpoch) = pumpParams else { return }
 
-        let task = Task { [weak self] in
-            defer {
-                if let self = self {
-                    self.activeTasksLock.withLock { tasks in
-                        _ = tasks.removeValue(forKey: taskId)
+        switch decision {
+        case .skip:
+            return
+        case .throttle(let delay, let work):
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work.item)
+            return
+        case .start(
+            let taskId,
+            let textToTranslate,
+            let capturedSourceLocaleId,
+            let capturedTargetLangCode,
+            let capturedEpoch,
+            let capturedResetEpoch,
+            let capturedDiscardEpoch
+        ):
+            // Resolve language codes outside `lock` so bare-Chinese locale resolution never stalls audio threads.
+            let transSrc = Self.translationLanguageCode(from: capturedSourceLocaleId)
+            let transTgt = Self.translationLanguageCode(from: capturedTargetLangCode, resolveBareChinese: true)
+            let uiSrc = Self.baseLanguageCode(from: capturedSourceLocaleId)
+            let uiTgt = Self.baseLanguageCode(from: capturedTargetLangCode)
+
+            reservePartialTranslationTask(id: taskId)
+            let task = Task { [weak self] in
+                defer {
+                    if let self = self {
+                        self.unregisterTranslationTask(id: taskId)
+                        self.lock.withLock { state in
+                            if state.activeTranslationTaskId == taskId &&
+                                state.sessionEpoch == capturedEpoch &&
+                                state.resetEpoch == capturedResetEpoch &&
+                                state.discardEpoch == capturedDiscardEpoch {
+                                state.isTranslating = false
+                                state.activeTranslationTaskId = nil
+                            }
+                        }
                     }
-                    self.lock.withLock { state in
+                }
+                guard let self = self,
+                      !Task.isCancelled,
+                      self.isPartialTranslationStillCurrent(
+                          taskId: taskId,
+                          utteranceID: utteranceID,
+                          sessionEpoch: capturedEpoch,
+                          resetEpoch: capturedResetEpoch,
+                          discardEpoch: capturedDiscardEpoch
+                      ) else {
+                    return
+                }
+                let translated = await TranslationEngine.shared.translate(
+                    text: textToTranslate,
+                    sourceCode: transSrc,
+                    targetCode: transTgt,
+                    isFinal: false
+                )
+                if Task.isCancelled { return }
+                await MainActor.run { [weak self] in
+                    guard let self = self else { return }
+                    let (partialUpdate, shouldPumpAgain) = self.lock.withLock { state -> ((String, String, Bool)?, Bool) in
                         if state.activeTranslationTaskId == taskId &&
                             state.sessionEpoch == capturedEpoch &&
                             state.resetEpoch == capturedResetEpoch &&
@@ -1483,74 +2376,57 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                             state.isTranslating = false
                             state.activeTranslationTaskId = nil
                         }
+                        guard !Task.isCancelled,
+                              state.isRunning,
+                              state.sessionEpoch == capturedEpoch,
+                              state.resetEpoch == capturedResetEpoch,
+                              state.discardEpoch == capturedDiscardEpoch,
+                              state.currentUtteranceID == utteranceID else {
+                            return (nil, false)
+                        }
+
+                        if let translated = translated, !translated.isEmpty {
+                            state.currentTranslated = translated
+                            state.currentTranslatedSourceText = textToTranslate.trimmingCharacters(in: .whitespacesAndNewlines)
+                            state.currentIsUntranslated = false
+                        } else if state.currentTranslated.isEmpty && state.pendingTailText == nil {
+                            // Do not overwrite an existing valid partial translation or flag
+                            // active superseded partials as untranslated.
+                            state.currentIsUntranslated = true
+                        } else {
+                            return (nil, state.pendingTailText != nil)
+                        }
+
+                        let activeOrig = state.currentOriginal
+                        let partial: (String, String, Bool)?
+                        if !activeOrig.isEmpty {
+                            let displayTrans = state.currentTranslated.isEmpty ? activeOrig : state.currentTranslated
+                            partial = (activeOrig, displayTrans, state.currentIsUntranslated)
+                        } else {
+                            partial = nil
+                        }
+                        return (partial, state.pendingTailText != nil)
+                    }
+
+                    if let (activeOrig, displayTrans, isUntrans) = partialUpdate {
+                        self.onPartial?(utteranceID, activeOrig, displayTrans, isUntrans)
+                        self.onPartialWithLanguages?(utteranceID, activeOrig, displayTrans, uiSrc, uiTgt, isUntrans)
+                    }
+
+                    if shouldPumpAgain {
+                        self.pumpTranslationLoop(utteranceID: utteranceID)
                     }
                 }
             }
-            let translated = await TranslationEngine.shared.translate(
-                text: textToTranslate,
-                sourceCode: transSrc,
-                targetCode: transTgt,
-                isFinal: false
-            )
-            if Task.isCancelled { return }
-            await MainActor.run { [weak self] in
-                guard let self = self else { return }
-                let (partialUpdate, shouldPumpAgain) = self.lock.withLock { state -> ((String, String, Bool)?, Bool) in
-                    if state.activeTranslationTaskId == taskId &&
-                        state.sessionEpoch == capturedEpoch &&
-                        state.resetEpoch == capturedResetEpoch &&
-                        state.discardEpoch == capturedDiscardEpoch {
-                        state.isTranslating = false
-                        state.activeTranslationTaskId = nil
-                    }
-                    guard !Task.isCancelled,
-                          state.isRunning,
-                          state.sessionEpoch == capturedEpoch,
-                          state.resetEpoch == capturedResetEpoch,
-                          state.discardEpoch == capturedDiscardEpoch,
-                          state.currentUtteranceID == utteranceID else {
-                        return (nil, false)
-                    }
-
-                    if let translated = translated, !translated.isEmpty {
-                        state.currentTranslated = translated
-                        state.currentIsUntranslated = false
-                    } else if state.currentTranslated.isEmpty && state.pendingTailText == nil {
-                        // Do not overwrite an existing valid partial translation or flag
-                        // active superseded partials as untranslated.
-                        state.currentIsUntranslated = true
-                    } else {
-                        return (nil, state.pendingTailText != nil)
-                    }
-
-                    let activeOrig = state.currentOriginal
-                    let partial: (String, String, Bool)?
-                    if !activeOrig.isEmpty {
-                        let displayTrans = state.currentTranslated.isEmpty ? activeOrig : state.currentTranslated
-                        partial = (activeOrig, displayTrans, state.currentIsUntranslated)
-                    } else {
-                        partial = nil
-                    }
-                    return (partial, state.pendingTailText != nil)
-                }
-
-                if let (activeOrig, displayTrans, isUntrans) = partialUpdate {
-                    self.onPartial?(utteranceID, activeOrig, displayTrans, isUntrans)
-                    self.onPartialWithLanguages?(utteranceID, activeOrig, displayTrans, uiSrc, uiTgt, isUntrans)
-                }
-
-                if shouldPumpAgain {
-                    self.pumpTranslationLoop(utteranceID: utteranceID)
-                }
-            }
+            attachTranslationTask(task, id: taskId)
         }
-        activeTasksLock.withLock { $0[taskId] = (.partial, task) }
     }
 
     private func commitCompletedSentence(
         _ orig: String,
         fallbackTranslated: String = "",
         fallbackUntranslated: Bool = false,
+        fallbackTranslatedSource: String? = nil,
         utteranceID: UUID,
         sourceLocaleId: String? = nil,
         targetLangCode: String? = nil
@@ -1558,13 +2434,19 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         let cleanOrig = orig.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanOrig.isEmpty else { return }
 
-        let (effSrcLocale, effTgtCode, capturedDiscardEpoch) = lock.withLock { state -> (String, String, UInt64) in
-            return (sourceLocaleId ?? state.sourceLocaleId, targetLangCode ?? state.targetLangCode, state.discardEpoch)
+        let (effSrcLocale, effTgtCode, capturedDiscardEpoch, currentTranslatedSource) = lock.withLock { state -> (String, String, UInt64, String) in
+            return (
+                sourceLocaleId ?? state.sourceLocaleId,
+                targetLangCode ?? state.targetLangCode,
+                state.discardEpoch,
+                state.currentTranslatedSourceText
+            )
         }
         let uiSrc = Self.baseLanguageCode(from: effSrcLocale)
         let uiTgt = Self.baseLanguageCode(from: effTgtCode)
 
         if uiSrc == uiTgt {
+            advanceFinalRevisionAndCancelPrior(for: utteranceID)
             onFinal?(utteranceID, cleanOrig, cleanOrig, false)
             onFinalWithLanguages?(utteranceID, cleanOrig, cleanOrig, uiSrc, uiTgt, false)
             return
@@ -1574,17 +2456,33 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         let transTgt = Self.translationLanguageCode(from: effTgtCode, resolveBareChinese: true)
 
         let cleanFallback = fallbackTranslated.trimmingCharacters(in: .whitespacesAndNewlines)
-        let initialUntranslated = fallbackUntranslated || cleanFallback.isEmpty
-        let initialTrans = cleanFallback.isEmpty ? cleanOrig : cleanFallback
-        onFinal?(utteranceID, cleanOrig, initialTrans, initialUntranslated)
-        onFinalWithLanguages?(utteranceID, cleanOrig, initialTrans, uiSrc, uiTgt, initialUntranslated)
+        let matchedSource = (fallbackTranslatedSource ?? currentTranslatedSource).trimmingCharacters(in: .whitespacesAndNewlines)
+        let translatedSourceMatchesOrig = !cleanFallback.isEmpty && !fallbackUntranslated && (matchedSource == cleanOrig)
 
-        let taskId = UUID()
+        if translatedSourceMatchesOrig {
+            // The exact finalized text was already translated via the same TranslationSession API;
+            // cancel any older final revision for this utterance, emit immediately, and promote into final cache.
+            advanceFinalRevisionAndCancelPrior(for: utteranceID)
+            onFinal?(utteranceID, cleanOrig, cleanFallback, false)
+            onFinalWithLanguages?(utteranceID, cleanOrig, cleanFallback, uiSrc, uiTgt, false)
+            Task {
+                await TranslationEngine.shared.storeFinalCache(
+                    text: cleanOrig,
+                    translated: cleanFallback,
+                    sourceCode: transSrc,
+                    targetCode: transTgt
+                )
+            }
+            return
+        }
+
+        let (taskId, revision) = reserveFinalTranslationTask(for: utteranceID)
+        onFinal?(utteranceID, cleanOrig, cleanOrig, true)
+        onFinalWithLanguages?(utteranceID, cleanOrig, cleanOrig, uiSrc, uiTgt, true)
+
         let task = Task { [weak self] in
             defer {
-                self?.activeTasksLock.withLock { tasks in
-                    _ = tasks.removeValue(forKey: taskId)
-                }
+                self?.unregisterTranslationTask(id: taskId)
             }
             let translated = await TranslationEngine.shared.translate(
                 text: cleanOrig,
@@ -1594,20 +2492,22 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             )
             if Task.isCancelled { return }
             await MainActor.run { [weak self] in
-                guard let self = self, !Task.isCancelled, self.currentDiscardEpoch == capturedDiscardEpoch else { return }
+                guard let self = self,
+                      !Task.isCancelled,
+                      self.currentDiscardEpoch == capturedDiscardEpoch,
+                      self.isLatestFinalRevision(revision, for: utteranceID) else {
+                    return
+                }
                 if let translated = translated {
                     let cleanRefined = translated.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !cleanRefined.isEmpty && (cleanRefined != initialTrans || initialUntranslated) {
+                    if !cleanRefined.isEmpty {
                         self.onFinal?(utteranceID, cleanOrig, cleanRefined, false)
                         self.onFinalWithLanguages?(utteranceID, cleanOrig, cleanRefined, uiSrc, uiTgt, false)
                     }
-                } else if !initialUntranslated {
-                    self.onFinal?(utteranceID, cleanOrig, cleanOrig, true)
-                    self.onFinalWithLanguages?(utteranceID, cleanOrig, cleanOrig, uiSrc, uiTgt, true)
                 }
             }
         }
-        activeTasksLock.withLock { $0[taskId] = (.final, task) }
+        attachTranslationTask(task, id: taskId)
     }
 
     private func commitSilenceThought() {
@@ -1624,17 +2524,17 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             commit.original,
             fallbackTranslated: commit.fallbackTranslated,
             fallbackUntranslated: commit.fallbackUntranslated,
+            fallbackTranslatedSource: commit.fallbackTranslatedSource,
             utteranceID: commit.utteranceID,
             sourceLocaleId: commit.sourceLocaleId,
             targetLangCode: commit.targetLangCode
         )
-        closeCurrentSession()
+        closeCurrentSession(alreadyCommitted: commit)
     }
 
-    private func closeCurrentSession() {
+    private func closeCurrentSession(alreadyCommitted: PendingCommit? = nil) {
         let now = ProcessInfo.processInfo.systemUptime
-        let (pendingCommit, oldReq, oldTask, shouldStartNext) = lock.withLock { state -> (PendingCommit?, ManagedRequest?, SFSpeechRecognitionTask?, Bool) in
-            let commit = Self.consumePendingCommit(&state)
+        let (pendingCommit, oldReq, drainId, shouldStartNext) = lock.withLock { state -> (PendingCommit?, ManagedRequest?, UInt64?, Bool) in
             state.sessionTaskId &+= 1
             Self.cancelWorkItems(&state)
             state.isRestartScheduled = false
@@ -1642,15 +2542,14 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
             state.consecutiveErrors = 0
             let r = state.request
             state.request = nil
-            let t = state.task
-            state.task = nil
+            let (dId, commit) = Self.retireTaskForDraining(&state, alreadyCommitted: alreadyCommitted)
             state.recentSessionBuffers.removeAll(keepingCapacity: true)
             state.pendingPCMBuffers.removeAll { (now - $0.arrivalTime) >= 0.6 }
-            let hasFreshPending = state.isRunning && !state.isSuspended && !state.pendingPCMBuffers.isEmpty
+            let hasFreshPending = state.isRunning && !state.isSuspended && !state.isStartingSession && !state.isRequestingSpeechAuth && !state.pendingPCMBuffers.isEmpty
             if hasFreshPending {
                 state.isRestartScheduled = true
             }
-            return (commit, r, t, hasFreshPending)
+            return (commit, r, dId, hasFreshPending)
         }
 
         if let commit = pendingCommit {
@@ -1658,6 +2557,7 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
                 commit.original,
                 fallbackTranslated: commit.fallbackTranslated,
                 fallbackUntranslated: commit.fallbackUntranslated,
+                fallbackTranslatedSource: commit.fallbackTranslatedSource,
                 utteranceID: commit.utteranceID,
                 sourceLocaleId: commit.sourceLocaleId,
                 targetLangCode: commit.targetLangCode
@@ -1665,7 +2565,9 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
         }
 
         endManagedRequest(oldReq)
-        oldTask?.cancel()
+        if let drainId = drainId {
+            scheduleDrainTimeout(drainId)
+        }
         onSessionClosed?()
         if shouldStartNext {
             scheduleRestart(after: 0.02, forceReplace: false)
@@ -1673,11 +2575,27 @@ public final class SingleSpeechChannel: NSObject, @unchecked Sendable {
     }
 }
 
-public final class SpeechRecognitionManager: NSObject, @unchecked Sendable {
-    public weak var delegate: BidirectionalSpeechDelegate?
+final class SpeechRecognitionManager: NSObject, @unchecked Sendable {
+    private struct WeakDelegateBox: @unchecked Sendable {
+        weak var value: BidirectionalSpeechDelegate?
+    }
 
-    public let callerChannel = SingleSpeechChannel(name: "caller", sourceLocaleId: "es-ES", targetLangCode: "en")
-    public let micChannel = SingleSpeechChannel(name: "mic", sourceLocaleId: "en-US", targetLangCode: "es")
+    private struct DelegateRefBox: @unchecked Sendable {
+        let value: BidirectionalSpeechDelegate?
+    }
+
+    private let delegateLock = OSAllocatedUnfairLock(initialState: WeakDelegateBox())
+
+    var delegate: BidirectionalSpeechDelegate? {
+        get { delegateLock.withLock { DelegateRefBox(value: $0.value) }.value }
+        set {
+            let box = DelegateRefBox(value: newValue)
+            delegateLock.withLock { $0.value = box.value }
+        }
+    }
+
+    let callerChannel = SingleSpeechChannel(name: "caller", sourceLocaleId: "es-ES", targetLangCode: "en")
+    let micChannel = SingleSpeechChannel(name: "mic", sourceLocaleId: "en-US", targetLangCode: "es")
 
     private let managerLock = OSAllocatedUnfairLock()
     private var _isRunning: Bool = false
@@ -1685,7 +2603,7 @@ public final class SpeechRecognitionManager: NSObject, @unchecked Sendable {
     private var micFloorTimerScheduled: Bool = false
     private var micFloorTimerToken: UInt64 = 0
 
-    public var isRunning: Bool {
+    var isRunning: Bool {
         managerLock.withLock { _isRunning }
     }
 
@@ -1700,7 +2618,7 @@ public final class SpeechRecognitionManager: NSObject, @unchecked Sendable {
     private let isolationLock = OSAllocatedUnfairLock()
     private var _overrideAcousticIsolation: Bool? = nil
 
-    public var isAcousticallyIsolated: Bool {
+    var isAcousticallyIsolated: Bool {
         get {
             isolationLock.withLock {
                 if let overridden = _overrideAcousticIsolation {
@@ -1717,12 +2635,12 @@ public final class SpeechRecognitionManager: NSObject, @unchecked Sendable {
         }
     }
 
-    public override init() {
+    override init() {
         super.init()
         setupCallbacks()
     }
 
-    public static func requestAuthorization(completion: @escaping @Sendable (Bool) -> Void) {
+    static func requestAuthorization(completion: @escaping @Sendable (Bool) -> Void) {
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async {
                 completion(status == .authorized)
@@ -1751,8 +2669,8 @@ public final class SpeechRecognitionManager: NSObject, @unchecked Sendable {
                 isUntranslated: isUntrans
             )
         }
-        callerChannel.onAuthErrorWithChannel = { [weak self] chName, msg in
-            self?.delegate?.speechRecognitionDidEncounterAuthError(channelName: chName, message: msg)
+        callerChannel.onIssueWithChannel = { [weak self] chName, kind, msg in
+            self?.delegate?.speechRecognitionDidEncounterIssue(channelName: chName, kind: kind, message: msg)
         }
         callerChannel.onAuthSuccessWithChannel = { [weak self] chName in
             self?.delegate?.speechRecognitionDidClearAuthError(channelName: chName)
@@ -1783,15 +2701,19 @@ public final class SpeechRecognitionManager: NSObject, @unchecked Sendable {
                 isUntranslated: isUntrans
             )
         }
-        micChannel.onAuthErrorWithChannel = { [weak self] chName, msg in
-            self?.delegate?.speechRecognitionDidEncounterAuthError(channelName: chName, message: msg)
+        micChannel.onIssueWithChannel = { [weak self] chName, kind, msg in
+            self?.delegate?.speechRecognitionDidEncounterIssue(channelName: chName, kind: kind, message: msg)
         }
         micChannel.onAuthSuccessWithChannel = { [weak self] chName in
             self?.delegate?.speechRecognitionDidClearAuthError(channelName: chName)
         }
+        micChannel.onSessionClosed = { [weak self] in
+            guard let self = self else { return }
+            self.callerChannel.resumeAfterMicPriority()
+        }
     }
 
-    public func start(
+    func start(
         callerLocaleId: String,
         targetLangCode: String = "en",
         micLocaleId: String = "en-US",
@@ -1803,16 +2725,16 @@ public final class SpeechRecognitionManager: NSObject, @unchecked Sendable {
             _isRunning = true
         }
 
-        callerChannel.start(sourceLocaleId: callerLocaleId, targetLangCode: targetLangCode)
-
         if isMicEnabled {
             micChannel.start(sourceLocaleId: micLocaleId, targetLangCode: micTargetLangCode)
         } else {
             micChannel.stop()
         }
+
+        callerChannel.start(sourceLocaleId: callerLocaleId, targetLangCode: targetLangCode)
     }
 
-    public func stop() {
+    func stop() {
         cancelMicFloorReleaseWorkItem()
         managerLock.withLock {
             _isRunning = false
@@ -1821,17 +2743,24 @@ public final class SpeechRecognitionManager: NSObject, @unchecked Sendable {
         micChannel.stop()
     }
 
-    public func discardInFlight() {
+    func discardInFlight() {
         callerChannel.discardInFlight()
         micChannel.discardInFlight()
     }
 
-    public func resetFailureState() {
+    func resetFailureState() {
         callerChannel.resetFailureState()
         micChannel.resetFailureState()
     }
 
-    public func setMicEnabled(_ enabled: Bool, micLocaleId: String, micTargetLangCode: String) {
+    func revalidateAuthorizationAndStatus() {
+        if micChannel.isRunning {
+            micChannel.revalidateAuthorizationAndStatus()
+        }
+        callerChannel.revalidateAuthorizationAndStatus()
+    }
+
+    func setMicEnabled(_ enabled: Bool, micLocaleId: String, micTargetLangCode: String) {
         if enabled {
             micChannel.start(sourceLocaleId: micLocaleId, targetLangCode: micTargetLangCode)
         } else {
@@ -1843,14 +2772,27 @@ public final class SpeechRecognitionManager: NSObject, @unchecked Sendable {
 
     /// Feeds system (caller) audio.
     ///
-    /// On open speakers the mic channel is normally suspended while the caller
-    /// has the floor, so the session boundary follows the turn. When
-    /// `userHasFloor` is true the user started speaking before the caller
-    /// (turn-taking is arbitrated by the capture engine), so the caller's
-    /// audio must not tear down the user's in-progress reply: the caller is
-    /// still transcribed on its own channel, but the user keeps their turn.
-    public func feedCallerAudioBuffer(_ buffer: AVAudioPCMBuffer, userHasFloor: Bool = false) {
+    /// On open speakers the microphone speaker takes priority over the caller:
+    /// while `userHasFloor` is true, `callerChannel` yields and stays suspended
+    /// (stashing incoming caller audio) without interrupting `micChannel`.
+    /// When the user is not speaking, `callerChannel` is active and suspends
+    /// the idle `micChannel` on open speakers to prevent speaker bleed.
+    func feedCallerAudioBuffer(_ buffer: AVAudioPCMBuffer, userHasFloor: Bool = false) {
         let isolated = isAcousticallyIsolated
+        if isolated && micChannel.isSuspended {
+            cancelMicFloorReleaseWorkItem()
+            micChannel.resumeAfterMicPriority()
+        }
+        if !isolated && userHasFloor {
+            cancelMicFloorReleaseWorkItem()
+            if micChannel.isSuspended {
+                micChannel.resumeAfterMicPriority()
+            }
+            _ = callerChannel.suspendForMicPriority()
+            callerChannel.appendPCMBuffer(buffer, minimumStartDelay: 0.01)
+            return
+        }
+
         let yieldToCaller = !isolated && !userHasFloor
         let toreDownMic = yieldToCaller ? micChannel.suspendForMicPriority() : false
 
@@ -1897,17 +2839,27 @@ public final class SpeechRecognitionManager: NSObject, @unchecked Sendable {
 
     /// Feeds microphone audio that already passed the capture engine's gate.
     ///
-    /// `isUserSpeaking` means the user holds the speaking floor (they started
-    /// before the caller, or the caller's turn has ended). In that case the floor is handed
-    /// to the mic immediately instead of waiting for the caller's VAD hangover
-    /// plus the floor-release delay, so a quick reply starts transcribing at once.
-    public func feedMicAudioBuffer(_ buffer: AVAudioPCMBuffer, isUserSpeaking: Bool = false) {
+    /// The microphone speaker is prioritized before the caller: when `isUserSpeaking`
+    /// is true on open speakers, `micChannel` unsuspends immediately and `callerChannel`
+    /// is suspended so the user's speech is transcribed without contention.
+    func feedMicAudioBuffer(_ buffer: AVAudioPCMBuffer, isUserSpeaking: Bool = false) {
         let isolated = isAcousticallyIsolated
-        if isUserSpeaking && !isolated && micChannel.isSuspended {
+        if isolated && callerChannel.isSuspended {
+            callerChannel.resumeAfterMicPriority()
+        }
+        if (isUserSpeaking || isolated) && micChannel.isSuspended {
             cancelMicFloorReleaseWorkItem()
             micChannel.resumeAfterMicPriority()
         }
-        let closedIdleCaller = isolated ? false : callerChannel.finishIfIdleForPeerChannel()
-        micChannel.appendPCMBuffer(buffer, minimumStartDelay: closedIdleCaller ? 0.035 : 0.01)
+        let toreDownCaller: Bool
+        if !isolated && isUserSpeaking {
+            cancelMicFloorReleaseWorkItem()
+            toreDownCaller = callerChannel.suspendForMicPriority()
+        } else if !isolated {
+            toreDownCaller = callerChannel.finishIfIdleForPeerChannel()
+        } else {
+            toreDownCaller = false
+        }
+        micChannel.appendPCMBuffer(buffer, minimumStartDelay: toreDownCaller ? 0.035 : 0.01)
     }
 }

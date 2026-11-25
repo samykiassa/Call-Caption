@@ -3,22 +3,26 @@ import Network
 import AppKit
 import Security
 import Darwin
+import Compression
+import zlib
 import os
 
-public struct LiveCaptionEvent: Codable, Sendable, Equatable {
-    public let id: String
-    public let timestamp: String
-    public let speaker: String
-    public let originalText: String
-    public let translatedText: String
-    public let sourceLangCode: String
-    public let targetLangCode: String
-    public let isFinal: Bool
-    public let isUntranslated: Bool
+struct LiveCaptionEvent: Codable, Sendable, Equatable {
+    let id: String
+    let timestamp: String
+    let timestampMs: Int64
+    let speaker: String
+    let originalText: String
+    let translatedText: String
+    let sourceLangCode: String
+    let targetLangCode: String
+    let isFinal: Bool
+    let isUntranslated: Bool
 
-    public init(
+    init(
         id: String = UUID().uuidString,
         timestamp: String,
+        timestampMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000),
         speaker: String,
         originalText: String,
         translatedText: String,
@@ -29,6 +33,7 @@ public struct LiveCaptionEvent: Codable, Sendable, Equatable {
     ) {
         self.id = id
         self.timestamp = timestamp
+        self.timestampMs = timestampMs
         self.speaker = speaker
         self.originalText = originalText
         self.translatedText = translatedText
@@ -39,21 +44,35 @@ public struct LiveCaptionEvent: Codable, Sendable, Equatable {
     }
 }
 
-public struct ParsedHTTPRequest: Sendable, Equatable {
-    public let method: String
-    public let path: String
-    public let host: String?
-    public let hasProxyHeaders: Bool
+struct ParsedHTTPRequest: Sendable, Equatable {
+    let method: String
+    let path: String
+    let host: String?
+    let hasProxyHeaders: Bool
+    let viewerID: String?
+    let acceptLanguage: String?
+    let acceptsGzip: Bool
 
-    public init(method: String, path: String, host: String?, hasProxyHeaders: Bool = false) {
+    init(
+        method: String,
+        path: String,
+        host: String?,
+        hasProxyHeaders: Bool = false,
+        viewerID: String? = nil,
+        acceptLanguage: String? = nil,
+        acceptsGzip: Bool = false
+    ) {
         self.method = method
         self.path = path
         self.host = host
         self.hasProxyHeaders = hasProxyHeaders
+        self.viewerID = viewerID
+        self.acceptLanguage = acceptLanguage
+        self.acceptsGzip = acceptsGzip
     }
 }
 
-public enum HTTPRouteAction: Sendable, Equatable {
+enum HTTPRouteAction: Sendable, Equatable {
     case serveHTML
     case serveAPIState
     case serveSSE
@@ -62,27 +81,37 @@ public enum HTTPRouteAction: Sendable, Equatable {
     case methodNotAllowed
 }
 
-public final class LiveShareManager: @unchecked Sendable {
-    public static let shared = LiveShareManager()
+final class LiveShareManager: @unchecked Sendable {
+    static let shared = LiveShareManager()
 
-    public static let stateDidChangeNotification = Notification.Name("LiveShareManagerStateDidChangeNotification")
-    public static let urlDidUpdateNotification = Notification.Name("LiveShareManagerURLDidUpdateNotification")
+    static let stateDidChangeNotification = Notification.Name("LiveShareManagerStateDidChangeNotification")
+    static let urlDidUpdateNotification = Notification.Name("LiveShareManagerURLDidUpdateNotification")
 
     private static let timeFormatter: DateFormatter = {
         let df = DateFormatter()
-        df.dateFormat = "HH:mm:ss"
+        df.dateStyle = .none
+        df.timeStyle = .medium
         return df
     }()
     private static let formatterLock = OSAllocatedUnfairLock()
 
-    public static let sshTunnelRegex = try! NSRegularExpression(
-        pattern: #"https://(?!admin\.|www\.|docs\.|api\.)(?:[a-zA-Z0-9-]+\.)+(?:lhr\.life|lhr\.rocks|localhost\.run)(?!(?:\.[a-zA-Z0-9-]+)|[a-zA-Z0-9-])"#
+    static let sshTunnelRegex = try! NSRegularExpression(
+        pattern: #"https://(?!(?:admin|www|docs|api|status|app|login|auth|blog|help|support|mail|dashboard)\.)(?:[a-zA-Z0-9-]+\.)+(?:lhr\.life|lhr\.rocks|localhost\.run)(?!(?:\.[a-zA-Z0-9-]+)|[a-zA-Z0-9-])"#
     )
 
-    public static func extractTunnelURL(
+    static func extractTunnelURL(
         from text: String,
         regex: NSRegularExpression = sshTunnelRegex
     ) -> URL? {
+        let lines = text.components(separatedBy: .newlines)
+        for line in lines.reversed() where line.localizedCaseInsensitiveContains("tunneled with tls termination") {
+            let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
+            if let match = regex.matches(in: line, options: [], range: lineRange).last,
+               let range = Range(match.range, in: line),
+               let url = URL(string: String(line[range])) {
+                return url
+            }
+        }
         let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
         guard let match = regex.matches(in: text, options: [], range: nsRange).last,
               let range = Range(match.range, in: text) else {
@@ -101,10 +130,14 @@ public final class LiveShareManager: @unchecked Sendable {
         var port: UInt16 = 0
         var localIP: String = "127.0.0.1"
         var localURL: URL? = nil
+        var lanIPUnavailable: Bool = false
         var publicURL: URL? = nil
+        var lastPublishedPublicURL: URL? = nil
+        var publicLinkRotated: Bool = false
         var tunnelHost: String? = nil
         var isTunnelStarting: Bool = false
         var tunnelError: String? = nil
+        var serverError: String? = nil
         var activeClientCount: Int = 0
         var isPaused: Bool = false
         var allowLAN: Bool = false
@@ -121,12 +154,14 @@ public final class LiveShareManager: @unchecked Sendable {
         let id: ObjectIdentifier
         let connection: NWConnection
         let encryptPayloads: Bool
+        let viewerID: String?
         var pendingSends: Int = 0
 
-        init(connection: NWConnection, encryptPayloads: Bool) {
+        init(connection: NWConnection, encryptPayloads: Bool, viewerID: String? = nil) {
             self.id = ObjectIdentifier(connection)
             self.connection = connection
             self.encryptPayloads = encryptPayloads
+            self.viewerID = viewerID
         }
     }
 
@@ -140,22 +175,63 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
+    private final class DeferredTeardownState: @unchecked Sendable {
+        var didRun: Bool = false
+        let oldListener: NWListener?
+        let capturedProc: Process?
+        var closingConnections: [NWConnection]
+        var flushWorkItem: DispatchWorkItem?
+
+        init(oldListener: NWListener?, capturedProc: Process?, closingConnections: [NWConnection]) {
+            self.oldListener = oldListener
+            self.capturedProc = capturedProc
+            self.closingConnections = closingConnections
+        }
+    }
+
+    private final class ConnectionCloseGate: @unchecked Sendable {
+        var didClose: Bool = false
+    }
+
+    private struct HTMLCacheKey: Hashable {
+        let token: String
+        let resolvedLang: String
+        let encryptPayloads: Bool
+    }
+
+    private struct CachedHTMLResponse {
+        let rawData: Data
+        var gzipData: Data?
+        var didComputeGzip: Bool = false
+    }
+
     private let lock = OSAllocatedUnfairLock(initialState: State())
     private let maxSSEClients = 20
     private let maxPendingSendsPerClient = 8
     private let maxActiveHTTPConnections = 64
+    private let maxNonLoopbackHTTPConnections = 48
 
     private let jsonEncoder = JSONEncoder()
     private var listener: NWListener?
+    private var listenerStartupTimeoutWorkItem: DispatchWorkItem?
+    private var deferredTeardownListener: NWListener?
+    private var deferredTeardownWorkItem: DispatchWorkItem?
+    private var deferredTeardownState: DeferredTeardownState?
+    private var htmlResponseCache: [HTMLCacheKey: CachedHTMLResponse] = [:]
     private var activeHTTPConnections: [ObjectIdentifier: NWConnection] = [:]
+    private var nonLoopbackHTTPConnectionIDs: Set<ObjectIdentifier> = []
     private var sseClients: [ObjectIdentifier: SSEClient] = [:]
     private var pendingSSEHandshakes: [ObjectIdentifier: NWConnection] = [:]
     private var sseStreamSequence: UInt64 = 0
     private var stateSequence: UInt64 = 0
     private var tunnelProcess: Process?
+    private var terminatingTunnelProcess: Process?
     private var tunnelPipe: Pipe?
+    private var tunnelReadSource: DispatchSourceRead?
     private var tunnelGeneration: UInt64 = 0
     private var tunnelOutputBuffer: String = ""
+    private var tunnelPendingLineBuffer: String = ""
+    private var hasEstablishedTunnelURLInGeneration: Bool = false
     private var tunnelPartialUTF8Data = Data()
     private var tunnelConnectedUptime: TimeInterval = 0
     private var tunnelTimeoutWorkItem: DispatchWorkItem?
@@ -163,43 +239,93 @@ public final class LiveShareManager: @unchecked Sendable {
     private var tunnelStabilityWorkItem: DispatchWorkItem?
     private var tunnelRestartAttempts: Int = 0
     private var pingTimer: DispatchSourceTimer?
+    private var pathMonitor: NWPathMonitor?
+    private var pollingViewers: [String: TimeInterval] = [:]
+    private var pollingPruneWorkItem: DispatchWorkItem?
+    private let pollingViewerTTL: TimeInterval = 5.0
     private let serverQueue = DispatchQueue(label: "com.callcaption.liveshare.server", qos: .userInitiated)
     private let serverQueueKey = DispatchSpecificKey<Void>()
 
-    public var isSharing: Bool {
+    var isSharing: Bool {
         lock.withLock { $0.isSharing }
     }
 
-    public var publicShareURL: URL? {
+    var publicShareURL: URL? {
         lock.withLock { $0.publicURL }
     }
 
-    public var localShareURL: URL? {
+    var localShareURL: URL? {
         lock.withLock { $0.localURL }
     }
 
-    public var displayLANURL: URL? {
-        localShareURL
+    var displayLANURL: URL? {
+        lock.withLock { state in
+            guard state.allowLAN, !state.lanIPUnavailable else { return nil }
+            return state.localURL
+        }
     }
 
-    public var effectiveShareURL: URL? {
-        lock.withLock { $0.publicURL ?? $0.localURL }
+    var effectiveShareURL: URL? {
+        lock.withLock { state in
+            if let publicURL = state.publicURL {
+                return publicURL
+            }
+            guard (state.allowLAN || !state.useExternalTunnel), !state.lanIPUnavailable else {
+                return nil
+            }
+            return state.localURL
+        }
     }
 
-    public var isTunnelStarting: Bool {
+    var isTunnelStarting: Bool {
         lock.withLock { $0.isTunnelStarting }
     }
 
-    public var tunnelError: String? {
+    var tunnelError: String? {
         lock.withLock { $0.tunnelError }
     }
 
-    public var activeClientCount: Int {
+    var serverError: String? {
+        lock.withLock { $0.serverError }
+    }
+
+    var lanIPUnavailable: Bool {
+        lock.withLock { $0.lanIPUnavailable }
+    }
+
+    var publicLinkRotated: Bool {
+        lock.withLock { $0.publicLinkRotated }
+    }
+
+    var activeClientCount: Int {
         lock.withLock { $0.activeClientCount }
+    }
+
+    func acknowledgePublicLinkRotation() {
+        let changed = lock.withLock { state -> Bool in
+            guard state.publicLinkRotated else { return false }
+            state.publicLinkRotated = false
+            return true
+        }
+        if changed {
+            notifyStateChange()
+        }
+    }
+
+    func clearServerError() {
+        let changed = lock.withLock { state -> Bool in
+            guard !state.isSharing, state.serverError != nil else { return false }
+            state.serverError = nil
+            return true
+        }
+        if changed {
+            notifyStateChange()
+        }
     }
 
     private init() {
         serverQueue.setSpecific(key: serverQueueKey, value: ())
+        Self.reapOrphanedSSHTunnelIfNeeded()
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
@@ -210,12 +336,12 @@ public final class LiveShareManager: @unchecked Sendable {
     }
 
 
-    public static func isLoopbackHost(_ host: String) -> Bool {
+    static func isLoopbackHost(_ host: String) -> Bool {
         let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
         return normalized == "127.0.0.1" || normalized == "localhost" || normalized == "::1"
     }
 
-    public static func buildLocalShareURL(
+    static func buildLocalShareURL(
         host: String,
         port: UInt16,
         sessionToken: String,
@@ -233,7 +359,7 @@ public final class LiveShareManager: @unchecked Sendable {
     }
 
 
-    public static func generateSessionToken() -> String {
+    static func generateSessionToken() -> String {
         var bytes = [UInt8](repeating: 0, count: 16)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         if status == errSecSuccess {
@@ -242,7 +368,25 @@ public final class LiveShareManager: @unchecked Sendable {
         return UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 
-    public static func parseHTTPRequest(_ raw: String) -> ParsedHTTPRequest? {
+    private static func extractViewerID(fromQuery query: String) -> String? {
+        for pair in query.split(separator: "&", omittingEmptySubsequences: true) {
+            let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard kv.count == 2, kv[0] == "viewer" else { continue }
+            let rawValue = String(kv[1])
+            let decoded = rawValue.removingPercentEncoding ?? rawValue
+            guard !decoded.isEmpty, decoded.count <= 64 else { return nil }
+            let valid = decoded.unicodeScalars.allSatisfy { scalar in
+                (scalar >= "0" && scalar <= "9")
+                || (scalar >= "A" && scalar <= "Z")
+                || (scalar >= "a" && scalar <= "z")
+                || scalar == "-" || scalar == "_"
+            }
+            return valid ? decoded : nil
+        }
+        return nil
+    }
+
+    static func parseHTTPRequest(_ raw: String) -> ParsedHTTPRequest? {
         let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
         guard !normalized.utf8.contains(0x0D) else { return nil }
         guard let firstLineEnd = normalized.range(of: "\n") else { return nil }
@@ -251,10 +395,14 @@ public final class LiveShareManager: @unchecked Sendable {
         guard parts.count >= 2 else { return nil }
         let method = String(parts[0]).uppercased()
         let fullPath = String(parts[1])
-        let cleanPath = fullPath.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? fullPath
+        let pathParts = fullPath.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        let cleanPath = pathParts.first.map(String.init) ?? fullPath
+        let viewerID = pathParts.count > 1 ? extractViewerID(fromQuery: String(pathParts[1])) : nil
 
         var hostHeader: String? = nil
         var hasProxyHeaders = false
+        var acceptLanguageHeader: String? = nil
+        var acceptsGzip = false
         let lines = normalized.components(separatedBy: "\n")
         for rawLine in lines.dropFirst() {
             if rawLine.isEmpty { break }
@@ -273,12 +421,40 @@ public final class LiveShareManager: @unchecked Sendable {
                 || lowerLine.hasPrefix("x-forwarded-host:")
                 || lowerLine.hasPrefix("forwarded:") {
                 hasProxyHeaders = true
+            } else if lowerLine.hasPrefix("accept-language:") {
+                let value = line.dropFirst("accept-language:".count).trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty && acceptLanguageHeader == nil {
+                    acceptLanguageHeader = String(value.prefix(256))
+                }
+            } else if lowerLine.hasPrefix("accept-encoding:") {
+                let value = lowerLine.dropFirst("accept-encoding:".count)
+                for rawToken in value.split(separator: ",") {
+                    let parts = rawToken.split(separator: ";")
+                    let encoding = parts.first?.trimmingCharacters(in: .whitespaces) ?? ""
+                    guard encoding == "gzip" else { continue }
+                    let qZero = parts.dropFirst().contains { param in
+                        let trimmed = param.trimmingCharacters(in: .whitespaces)
+                        guard trimmed.hasPrefix("q=") else { return false }
+                        return Double(trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)) == 0.0
+                    }
+                    if !qZero {
+                        acceptsGzip = true
+                    }
+                }
             }
         }
-        return ParsedHTTPRequest(method: method, path: cleanPath, host: hostHeader, hasProxyHeaders: hasProxyHeaders)
+        return ParsedHTTPRequest(
+            method: method,
+            path: cleanPath,
+            host: hostHeader,
+            hasProxyHeaders: hasProxyHeaders,
+            viewerID: viewerID,
+            acceptLanguage: acceptLanguageHeader,
+            acceptsGzip: acceptsGzip
+        )
     }
 
-    public static func isAllowedHost(
+    static func isAllowedHost(
         _ host: String?,
         localIP: String,
         allowLAN: Bool,
@@ -297,7 +473,7 @@ public final class LiveShareManager: @unchecked Sendable {
         return false
     }
 
-    public static func evaluateRoute(
+    static func evaluateRoute(
         request: ParsedHTTPRequest,
         sessionToken: String,
         localIP: String,
@@ -325,7 +501,7 @@ public final class LiveShareManager: @unchecked Sendable {
     }
 
 
-    public func configure(
+    func configure(
         allowLAN: Bool? = nil,
         useExternalTunnel: Bool? = nil,
         shareBothSpeakers: Bool? = nil,
@@ -336,7 +512,12 @@ public final class LiveShareManager: @unchecked Sendable {
             let prev = state.shareBothSpeakers
             if let allowLAN { state.allowLAN = allowLAN }
             if let useExternalTunnel { state.useExternalTunnel = useExternalTunnel }
-            if let shareBothSpeakers { state.shareBothSpeakers = shareBothSpeakers }
+            if let shareBothSpeakers {
+                state.shareBothSpeakers = shareBothSpeakers
+                if !shareBothSpeakers {
+                    state.callerPartial = nil
+                }
+            }
             if let foreignLanguageCode { state.foreignLanguageCode = foreignLanguageCode }
             if let mainLanguageCode { state.mainLanguageCode = mainLanguageCode }
             return prev
@@ -346,7 +527,7 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
-    public func startSharing(
+    func startSharing(
         allowLAN: Bool? = nil,
         useExternalTunnel: Bool? = nil,
         shareBothSpeakers: Bool? = nil,
@@ -370,10 +551,15 @@ public final class LiveShareManager: @unchecked Sendable {
             state.sessionKeyFragment = keyFragment
             state.sessionCrypto = crypto
             state.port = 0
+            state.localIP = "127.0.0.1"
+            state.lanIPUnavailable = false
             state.isTunnelStarting = state.useExternalTunnel
             state.tunnelError = nil
+            state.serverError = nil
             state.isPaused = false
             state.publicURL = nil
+            state.lastPublishedPublicURL = nil
+            state.publicLinkRotated = false
             state.tunnelHost = nil
             state.localURL = nil
             state.history.removeAll()
@@ -390,43 +576,80 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
+    private func clearStateLocked(_ state: inout State, clearServerError: Bool) {
+        state.isSharing = false
+        state.sessionEpoch &+= 1
+        state.clearGeneration = 0
+        state.sessionToken = ""
+        state.sessionKeyFragment = ""
+        state.sessionCrypto = nil
+        state.port = 0
+        state.localIP = "127.0.0.1"
+        state.localURL = nil
+        state.lanIPUnavailable = false
+        state.isTunnelStarting = false
+        state.tunnelError = nil
+        if clearServerError {
+            state.serverError = nil
+        }
+        state.publicURL = nil
+        state.lastPublishedPublicURL = nil
+        state.publicLinkRotated = false
+        state.tunnelHost = nil
+        state.activeClientCount = 0
+        state.isPaused = false
+        state.history.removeAll()
+        state.callerPartial = nil
+        state.micPartial = nil
+    }
+
     @discardableResult
-    private func resetSharingState() -> Bool {
-        lock.withLock { state -> Bool in
-            guard state.isSharing else { return false }
-            state.isSharing = false
-            state.sessionEpoch &+= 1
-            state.clearGeneration = 0
-            state.sessionToken = ""
-            state.sessionKeyFragment = ""
-            state.sessionCrypto = nil
-            state.port = 0
-            state.isTunnelStarting = false
-            state.tunnelError = nil
-            state.publicURL = nil
-            state.tunnelHost = nil
-            state.localURL = nil
-            state.activeClientCount = 0
-            state.isPaused = false
-            state.history.removeAll()
-            state.callerPartial = nil
-            state.micPartial = nil
-            return true
+    private func resetSharingState(clearServerError: Bool = true) -> (wasSharing: Bool, crypto: LiveShareCrypto?) {
+        lock.withLock { state in
+            guard state.isSharing else {
+                if clearServerError {
+                    state.serverError = nil
+                }
+                return (false, nil)
+            }
+            let crypto = state.sessionCrypto
+            clearStateLocked(&state, clearServerError: clearServerError)
+            return (true, crypto)
         }
     }
 
-    public func stopSharing() {
-        guard resetSharingState() else { return }
+    private func failSharingWithServerErrorOnQueue(epoch: UInt64, message: String) {
+        let result = lock.withLock { state -> (didFail: Bool, crypto: LiveShareCrypto?) in
+            guard state.isSharing && state.sessionEpoch == epoch else { return (false, nil) }
+            let crypto = state.sessionCrypto
+            clearStateLocked(&state, clearServerError: false)
+            state.serverError = message
+            return (true, crypto)
+        }
+        guard result.didFail else { return }
+        tearDownServerAndTunnelOnQueue(endingCrypto: result.crypto)
+        notifyStateChange()
+    }
+
+    func stopSharing() {
+        let prevServerError = lock.withLock { $0.serverError }
+        let result = resetSharingState(clearServerError: true)
+        guard result.wasSharing else {
+            if prevServerError != nil {
+                notifyStateChange()
+            }
+            return
+        }
 
         serverQueue.async { [weak self] in
-            self?.tearDownServerAndTunnelOnQueue()
+            self?.tearDownServerAndTunnelOnQueue(endingCrypto: result.crypto)
         }
 
         notifyStateChange()
     }
 
-    public func stopSharingSynchronously() {
-        let wasSharing = resetSharingState()
+    func stopSharingSynchronously() {
+        let result = resetSharingState(clearServerError: true)
         let work = { [weak self] in
             self?.tearDownServerAndTunnelOnQueue(forceKillSynchronously: true)
         }
@@ -435,22 +658,51 @@ public final class LiveShareManager: @unchecked Sendable {
         } else {
             serverQueue.sync(execute: work)
         }
-        if wasSharing {
+        if result.wasSharing {
             notifyStateChange()
         }
     }
 
-    private func tearDownServerAndTunnelOnQueue(forceKillSynchronously: Bool = false) {
-        stopHeartbeatOnQueue()
+    private func flushPendingDeferredTeardownOnQueue(forceKillSynchronously: Bool) {
+        deferredTeardownWorkItem?.cancel()
+        deferredTeardownWorkItem = nil
+        if let state = deferredTeardownState {
+            deferredTeardownState = nil
+            state.didRun = true
+            state.flushWorkItem?.cancel()
+            state.flushWorkItem = nil
+            for conn in state.closingConnections {
+                conn.stateUpdateHandler = nil
+                conn.cancel()
+            }
+            state.closingConnections.removeAll()
+        }
+        if let pendingListener = deferredTeardownListener {
+            deferredTeardownListener = nil
+            pendingListener.stateUpdateHandler = nil
+            pendingListener.newConnectionHandler = nil
+            pendingListener.cancel()
+        }
+        if forceKillSynchronously {
+            terminateTunnelProcessOnQueue(forceKillSynchronously: true)
+        }
+    }
 
-        terminateTunnelProcessOnQueue(forceKillSynchronously: forceKillSynchronously)
+    private func tearDownServerAndTunnelOnQueue(forceKillSynchronously: Bool = false, endingCrypto: LiveShareCrypto? = nil) {
+        flushPendingDeferredTeardownOnQueue(forceKillSynchronously: forceKillSynchronously)
+        listenerStartupTimeoutWorkItem?.cancel()
+        listenerStartupTimeoutWorkItem = nil
+        htmlResponseCache.removeAll()
+        stopHeartbeatOnQueue()
+        stopPathMonitorOnQueue()
+        pollingPruneWorkItem?.cancel()
+        pollingPruneWorkItem = nil
+        pollingViewers.removeAll()
         tunnelRestartAttempts = 0
 
-        for (_, client) in sseClients {
-            client.connection.stateUpdateHandler = nil
-            client.connection.cancel()
-        }
+        let clientsToClose = Array(sseClients.values)
         sseClients.removeAll()
+
         for (_, conn) in pendingSSEHandshakes {
             conn.stateUpdateHandler = nil
             conn.cancel()
@@ -461,15 +713,126 @@ public final class LiveShareManager: @unchecked Sendable {
             conn.cancel()
         }
         activeHTTPConnections.removeAll()
-        sseStreamSequence = 0
-        stateSequence = 0
+        nonLoopbackHTTPConnectionIDs.removeAll()
 
-        listener?.stateUpdateHandler = nil
-        listener?.newConnectionHandler = nil
-        listener?.cancel()
+        let oldListener = listener
         listener = nil
+        oldListener?.stateUpdateHandler = nil
+        oldListener?.newConnectionHandler = nil
+
+        if !forceKillSynchronously, !clientsToClose.isEmpty {
+            tunnelTimeoutWorkItem?.cancel()
+            tunnelTimeoutWorkItem = nil
+            tunnelRestartWorkItem?.cancel()
+            tunnelRestartWorkItem = nil
+            tunnelStabilityWorkItem?.cancel()
+            tunnelStabilityWorkItem = nil
+
+            let endedData = Data("{}".utf8)
+            let needsPlain = clientsToClose.contains { !$0.encryptPayloads }
+            let needsEncrypted = clientsToClose.contains { $0.encryptPayloads }
+            let plainEndedFrame: Data? = needsPlain ? Self.makeSSEFrame(event: "ended", payload: endedData) : nil
+            let encryptedEndedFrame: Data?
+            if needsEncrypted, let endingCrypto {
+                sseStreamSequence &+= 1
+                let seq = sseStreamSequence
+                encryptedEndedFrame = (try? endingCrypto.seal(endedData, type: "ended", sequence: seq))
+                    .map { Self.makeSSEFrame(event: "ended", payload: $0) }
+            } else {
+                encryptedEndedFrame = nil
+            }
+            sseStreamSequence = 0
+            stateSequence = 0
+
+            let sendGroup = DispatchGroup()
+            var closingConnections: [NWConnection] = []
+            closingConnections.reserveCapacity(clientsToClose.count)
+            for client in clientsToClose {
+                let conn = client.connection
+                conn.stateUpdateHandler = nil
+                if let frame = client.encryptPayloads ? encryptedEndedFrame : plainEndedFrame {
+                    closingConnections.append(conn)
+                    sendGroup.enter()
+                    conn.send(content: frame, completion: .contentProcessed { _ in
+                        conn.cancel()
+                        sendGroup.leave()
+                    })
+                } else {
+                    conn.cancel()
+                }
+            }
+
+            deferredTeardownListener = oldListener
+            let teardownState = DeferredTeardownState(
+                oldListener: oldListener,
+                capturedProc: tunnelProcess,
+                closingConnections: closingConnections
+            )
+            deferredTeardownState = teardownState
+            let item = DispatchWorkItem { [weak self] in
+                self?.completeDeferredTeardownOnQueue(teardownState)
+            }
+            deferredTeardownWorkItem = item
+            serverQueue.asyncAfter(deadline: .now() + 0.15, execute: item)
+            sendGroup.notify(queue: serverQueue) { [weak self] in
+                guard let self = self,
+                      self.deferredTeardownState === teardownState,
+                      !teardownState.didRun else { return }
+                let flushItem = DispatchWorkItem { [weak self] in
+                    self?.completeDeferredTeardownOnQueue(teardownState)
+                }
+                teardownState.flushWorkItem = flushItem
+                // Allow a brief flush window for /usr/bin/ssh to forward the loopback frame before SIGTERM.
+                self.serverQueue.asyncAfter(deadline: .now() + 0.12, execute: flushItem)
+            }
+        } else {
+            for client in clientsToClose {
+                client.connection.stateUpdateHandler = nil
+                client.connection.cancel()
+            }
+            sseStreamSequence = 0
+            stateSequence = 0
+            oldListener?.cancel()
+            terminateTunnelProcessOnQueue(forceKillSynchronously: forceKillSynchronously)
+        }
     }
 
+    private func completeDeferredTeardownOnQueue(_ state: DeferredTeardownState) {
+        guard !state.didRun, deferredTeardownState === state else { return }
+        state.didRun = true
+        deferredTeardownState = nil
+        state.flushWorkItem?.cancel()
+        state.flushWorkItem = nil
+        deferredTeardownWorkItem?.cancel()
+        deferredTeardownWorkItem = nil
+        if deferredTeardownListener === state.oldListener {
+            deferredTeardownListener = nil
+        }
+        for conn in state.closingConnections {
+            conn.stateUpdateHandler = nil
+            conn.cancel()
+        }
+        state.closingConnections.removeAll()
+        state.oldListener?.cancel()
+        if let capturedProc = state.capturedProc, tunnelProcess === capturedProc {
+            terminateTunnelProcessOnQueue(forceKillSynchronously: false)
+        }
+    }
+
+
+    private func scheduleListenerStartupTimeoutOnQueue(epoch: UInt64, message: String) {
+        listenerStartupTimeoutWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.listenerStartupTimeoutWorkItem = nil
+            let stillWaiting = self.lock.withLock { $0.isSharing && $0.sessionEpoch == epoch && $0.port == 0 }
+            guard stillWaiting else { return }
+            AppLog.liveShare.error("NWListener startup timed out while waiting for network")
+            self.failSharingWithServerErrorOnQueue(epoch: epoch, message: message)
+        }
+        listenerStartupTimeoutWorkItem = item
+        serverQueue.asyncAfter(deadline: .now() + 9.0, execute: item)
+    }
 
     private func startLocalServerOnQueue(epoch: UInt64) {
         tearDownServerAndTunnelOnQueue()
@@ -485,13 +848,19 @@ public final class LiveShareManager: @unchecked Sendable {
             parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         }
 
+        let serverFailedMessage = AppL10n.string(
+            "share.server.failed",
+            fallback: "Local live link server failed to start."
+        )
+
         guard let validListener = try? NWListener(using: parameters) else {
             AppLog.liveShare.error("Failed to create NWListener")
-            stopSharing()
+            failSharingWithServerErrorOnQueue(epoch: epoch, message: serverFailedMessage)
             return
         }
 
         self.listener = validListener
+        scheduleListenerStartupTimeoutOnQueue(epoch: epoch, message: serverFailedMessage)
 
         validListener.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
@@ -503,15 +872,32 @@ public final class LiveShareManager: @unchecked Sendable {
 
             switch state {
             case .ready:
+                self.listenerStartupTimeoutWorkItem?.cancel()
+                self.listenerStartupTimeoutWorkItem = nil
                 guard let boundPort = validListener.port?.rawValue, boundPort > 0 else {
-                    self.stopSharing()
+                    self.failSharingWithServerErrorOnQueue(epoch: epoch, message: serverFailedMessage)
+                    return
+                }
+                let existingPort = self.lock.withLock { $0.sessionEpoch == epoch ? $0.port : 0 }
+                if existingPort == boundPort {
+                    if allowLAN {
+                        self.refreshLANAddressOnQueue(epoch: epoch)
+                    }
                     return
                 }
                 AppLog.liveShare.info("Live Share server listening on port \(boundPort, privacy: .public) (LAN: \(allowLAN, privacy: .public))")
                 self.setupLocalAndTunnelURLsOnQueue(port: boundPort, allowLAN: allowLAN, epoch: epoch)
+            case .waiting(let error):
+                AppLog.liveShare.error("NWListener waiting: \(error.localizedDescription, privacy: .public)")
+                let hasBoundPort = self.lock.withLock { $0.sessionEpoch == epoch && $0.port > 0 }
+                if !hasBoundPort && self.listenerStartupTimeoutWorkItem == nil {
+                    self.scheduleListenerStartupTimeoutOnQueue(epoch: epoch, message: serverFailedMessage)
+                }
             case .failed(let error):
+                self.listenerStartupTimeoutWorkItem?.cancel()
+                self.listenerStartupTimeoutWorkItem = nil
                 AppLog.liveShare.error("NWListener failed: \(error.localizedDescription, privacy: .public)")
-                self.stopSharing()
+                self.failSharingWithServerErrorOnQueue(epoch: epoch, message: serverFailedMessage)
             default:
                 break
             }
@@ -525,23 +911,80 @@ public final class LiveShareManager: @unchecked Sendable {
     }
 
     private func setupLocalAndTunnelURLsOnQueue(port: UInt16, allowLAN: Bool, epoch: UInt64) {
-        let detectedIP = allowLAN ? (Self.getLocalIPAddress() ?? "127.0.0.1") : "127.0.0.1"
-        let updated = lock.withLock { state -> Bool in
-            guard state.isSharing && state.sessionEpoch == epoch else { return false }
+        let detectedLANIP = allowLAN ? Self.getLocalIPAddress() : "127.0.0.1"
+        let hasRealLAN = !allowLAN || detectedLANIP != nil
+        let effectiveIP = detectedLANIP ?? "127.0.0.1"
+        let (updated, initialURL): (Bool, URL?) = lock.withLock { state -> (Bool, URL?) in
+            guard state.isSharing && state.sessionEpoch == epoch else { return (false, nil) }
             state.port = port
-            state.localIP = detectedIP
+            state.localIP = effectiveIP
+            state.lanIPUnavailable = allowLAN && !hasRealLAN
             state.localURL = Self.buildLocalShareURL(
-                host: detectedIP,
+                host: effectiveIP,
                 port: port,
                 sessionToken: state.sessionToken,
                 sessionKeyFragment: state.sessionKeyFragment
             )
-            return true
+            let url = (state.allowLAN || !state.useExternalTunnel) && !state.lanIPUnavailable ? state.localURL : nil
+            return (true, url)
         }
         guard updated else { return }
 
+        if allowLAN {
+            startPathMonitorOnQueue(epoch: epoch)
+        }
+        if let initialURL {
+            notifyURLUpdate(initialURL)
+        }
         notifyStateChange()
         startTunnelProcessOnQueue(port: port, epoch: epoch)
+    }
+
+    private func startPathMonitorOnQueue(epoch: UInt64) {
+        stopPathMonitorOnQueue()
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] _ in
+            self?.refreshLANAddressOnQueue(epoch: epoch)
+        }
+        monitor.start(queue: serverQueue)
+        pathMonitor = monitor
+    }
+
+    private func stopPathMonitorOnQueue() {
+        pathMonitor?.pathUpdateHandler = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
+    }
+
+    private func refreshLANAddressOnQueue(epoch: UInt64) {
+        let detectedLANIP = Self.getLocalIPAddress()
+        let (changed, updatedURL): (Bool, URL?) = lock.withLock { state -> (Bool, URL?) in
+            guard state.isSharing, state.sessionEpoch == epoch, state.allowLAN, state.port > 0 else {
+                return (false, nil)
+            }
+            let newIP = detectedLANIP ?? "127.0.0.1"
+            let newUnavailable = (detectedLANIP == nil)
+            let newLocalURL = Self.buildLocalShareURL(
+                host: newIP,
+                port: state.port,
+                sessionToken: state.sessionToken,
+                sessionKeyFragment: state.sessionKeyFragment
+            )
+            let ipOrFlagChanged = (state.localIP != newIP)
+                || (state.lanIPUnavailable != newUnavailable)
+                || (state.localURL != newLocalURL)
+            guard ipOrFlagChanged else { return (false, nil) }
+            state.localIP = newIP
+            state.lanIPUnavailable = newUnavailable
+            state.localURL = newLocalURL
+            let activeURL = state.publicURL ?? ((state.allowLAN || !state.useExternalTunnel) && !newUnavailable ? newLocalURL : nil)
+            return (true, activeURL)
+        }
+        guard changed else { return }
+        if let updatedURL {
+            notifyURLUpdate(updatedURL)
+        }
+        notifyStateChange()
     }
 
     private static func isLoopbackEndpoint(_ endpoint: NWEndpoint?) -> Bool {
@@ -560,28 +1003,76 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
+    private static func isVerifiedNonLoopbackIP(_ endpoint: NWEndpoint?) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else { return false }
+        switch host {
+        case .ipv4(let addr):
+            let bytes = addr.rawValue
+            guard bytes.count == 4 else { return false }
+            return bytes[0] != 127 && bytes != Data([0, 0, 0, 0])
+        case .ipv6(let addr):
+            if addr == .loopback || addr == .any { return false }
+            let bytes = addr.rawValue
+            guard bytes.count == 16 else { return false }
+            if bytes.starts(with: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127]) {
+                return false
+            }
+            return true
+        case .name:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+
     private func untrackHTTPConnectionOnQueue(_ connection: NWConnection) {
-        activeHTTPConnections.removeValue(forKey: ObjectIdentifier(connection))
+        let id = ObjectIdentifier(connection)
+        activeHTTPConnections.removeValue(forKey: id)
+        nonLoopbackHTTPConnectionIDs.remove(id)
     }
 
     private func handleIncomingConnectionOnQueue(_ connection: NWConnection, epoch: UInt64) {
         let isStillValid = lock.withLock { $0.isSharing && $0.sessionEpoch == epoch }
-        guard isStillValid, activeHTTPConnections.count < maxActiveHTTPConnections else {
+        let remoteEndpoint = connection.currentPath?.remoteEndpoint ?? connection.endpoint
+        let isNonLoopback = Self.isVerifiedNonLoopbackIP(remoteEndpoint)
+            && !Self.isLoopbackEndpoint(connection.currentPath?.localEndpoint)
+        let withinCapacity = activeHTTPConnections.count < maxActiveHTTPConnections
+            && (!isNonLoopback || nonLoopbackHTTPConnectionIDs.count < maxNonLoopbackHTTPConnections)
+        guard isStillValid, withinCapacity else {
             connection.cancel()
             return
         }
 
-        activeHTTPConnections[ObjectIdentifier(connection)] = connection
-        connection.start(queue: serverQueue)
+        let connID = ObjectIdentifier(connection)
+        activeHTTPConnections[connID] = connection
+        if isNonLoopback {
+            nonLoopbackHTTPConnectionIDs.insert(connID)
+        }
 
         let timeoutItem = DispatchWorkItem { [weak self, weak connection] in
             guard let connection = connection else { return }
             self?.untrackHTTPConnectionOnQueue(connection)
+            connection.stateUpdateHandler = nil
             connection.cancel()
         }
-        serverQueue.asyncAfter(deadline: .now() + 10.0, execute: timeoutItem)
+        let timeoutToken = HeaderTimeoutToken(timeoutItem)
 
-        receiveHTTPHeaderOnQueue(connection: connection, accumulated: Data(), timeoutItem: HeaderTimeoutToken(timeoutItem), epoch: epoch)
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            switch state {
+            case .failed, .cancelled:
+                timeoutToken.cancel()
+                if let connection {
+                    self?.untrackHTTPConnectionOnQueue(connection)
+                }
+            default:
+                break
+            }
+        }
+
+        connection.start(queue: serverQueue)
+        serverQueue.asyncAfter(deadline: .now() + 5.0, execute: timeoutItem)
+
+        receiveHTTPHeaderOnQueue(connection: connection, accumulated: Data(), timeoutItem: timeoutToken, epoch: epoch)
     }
 
     private func receiveHTTPHeaderOnQueue(
@@ -603,15 +1094,35 @@ public final class LiveShareManager: @unchecked Sendable {
                 return
             }
 
+            let prevCount = accumulated.count
             var buffer = accumulated
             if let data = content {
                 buffer.append(data)
             }
 
-            let requestString = String(decoding: buffer, as: UTF8.self)
-            if requestString.contains("\r\n\r\n") || requestString.contains("\n\n") {
+            let hasHeaderTerminator: Bool = buffer.withUnsafeBytes { rawBuf in
+                let total = rawBuf.count
+                guard total >= 2, let bytes = rawBuf.bindMemory(to: UInt8.self).baseAddress else { return false }
+                let start = max(0, prevCount - 3)
+                guard start <= total - 2 else { return false }
+                for i in start...(total - 2) {
+                    if bytes[i] == 0x0A && bytes[i + 1] == 0x0A {
+                        return true
+                    }
+                    if i + 3 < total
+                        && bytes[i] == 0x0D
+                        && bytes[i + 1] == 0x0A
+                        && bytes[i + 2] == 0x0D
+                        && bytes[i + 3] == 0x0A {
+                        return true
+                    }
+                }
+                return false
+            }
+
+            if hasHeaderTerminator {
+                let requestString = String(decoding: buffer, as: UTF8.self)
                 timeoutItem.cancel()
-                self.untrackHTTPConnectionOnQueue(connection)
                 self.routeHTTPRequestOnQueue(request: requestString, connection: connection, epoch: epoch)
             } else if isComplete || buffer.count >= 8192 {
                 timeoutItem.cancel()
@@ -636,6 +1147,7 @@ public final class LiveShareManager: @unchecked Sendable {
             return (true, state.sessionToken, state.localIP, state.tunnelHost, state.allowLAN)
         }
         guard isSharingNow else {
+            untrackHTTPConnectionOnQueue(connection)
             connection.cancel()
             return
         }
@@ -651,25 +1163,35 @@ public final class LiveShareManager: @unchecked Sendable {
         let host = parsed.host?.lowercased()
         let isLoopbackHeader = host.map { Self.isLoopbackHost($0) } ?? false
         let isTunnelHeader = tunnelHost.map { host == $0.lowercased() } ?? false
-        let arrivedOnLoopbackSocket = Self.isLoopbackEndpoint(connection.currentPath?.localEndpoint)
-            || Self.isLoopbackEndpoint(connection.currentPath?.remoteEndpoint)
+        let remoteEndpoint = connection.currentPath?.remoteEndpoint ?? connection.endpoint
+        let isVerifiedNonLoopbackSocket = Self.isVerifiedNonLoopbackIP(remoteEndpoint)
+            && Self.isVerifiedNonLoopbackIP(connection.currentPath?.localEndpoint)
+        let arrivedOnLoopbackSocket = !isVerifiedNonLoopbackSocket
         let includeBody = parsed.method != "HEAD"
 
         // Prevent tunnel intermediaries or local loopback clients from downgrading payload
-        // encryption by spoofing the LAN Host header.
+        // encryption by spoofing the LAN Host header. Fail closed if socket endpoints are unknown.
         if !isLoopbackHeader && !isTunnelHeader && (arrivedOnLoopbackSocket || parsed.hasProxyHeaders) {
             sendSimpleResponse(connection: connection, status: "403 Forbidden", body: "Forbidden", includeBody: includeBody)
             return
         }
-        let encryptPayloads = isLoopbackHeader || isTunnelHeader || arrivedOnLoopbackSocket
+        let isVerifiedLANRequest = allowLAN && isVerifiedNonLoopbackSocket && !isLoopbackHeader && !isTunnelHeader && !parsed.hasProxyHeaders
+        let encryptPayloads = !isVerifiedLANRequest
 
         switch action {
         case .serveHTML:
-            handleServeHTMLOnQueue(connection, token: token, encryptPayloads: encryptPayloads, includeBody: includeBody)
+            handleServeHTMLOnQueue(
+                connection,
+                token: token,
+                encryptPayloads: encryptPayloads,
+                includeBody: includeBody,
+                acceptLanguage: parsed.acceptLanguage,
+                acceptsGzip: parsed.acceptsGzip
+            )
         case .serveAPIState:
-            handleAPIStateOnQueue(connection, encryptPayloads: encryptPayloads, includeBody: includeBody, epoch: epoch)
+            handleAPIStateOnQueue(connection, encryptPayloads: encryptPayloads, includeBody: includeBody, epoch: epoch, viewerID: parsed.viewerID)
         case .serveSSE:
-            handleSSEConnectionOnQueue(connection, encryptPayloads: encryptPayloads, epoch: epoch)
+            handleSSEConnectionOnQueue(connection, encryptPayloads: encryptPayloads, epoch: epoch, viewerID: parsed.viewerID)
         case .forbidden:
             sendSimpleResponse(connection: connection, status: "403 Forbidden", body: "Forbidden", includeBody: includeBody)
         case .notFound:
@@ -679,6 +1201,78 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
+    static func gzipCompress(_ data: Data) -> Data? {
+        guard !data.isEmpty else { return nil }
+        let dstCapacity = max(64, data.count + 512)
+        var dstBuffer = [UInt8](repeating: 0, count: dstCapacity)
+        let compressedCount = data.withUnsafeBytes { rawBuf -> Int in
+            guard let base = rawBuf.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+            return compression_encode_buffer(&dstBuffer, dstCapacity, base, data.count, nil, COMPRESSION_ZLIB)
+        }
+        guard compressedCount > 0 else { return nil }
+
+        let crc: UInt32 = data.withUnsafeBytes { rawBuf in
+            var running = zlib.crc32(0, nil, 0)
+            guard let base = rawBuf.bindMemory(to: UInt8.self).baseAddress else {
+                return UInt32(truncatingIfNeeded: running)
+            }
+            var offset = 0
+            while offset < rawBuf.count {
+                let chunk = min(rawBuf.count - offset, Int(UInt32.max))
+                running = zlib.crc32(running, base.advanced(by: offset), uInt(chunk))
+                offset += chunk
+            }
+            return UInt32(truncatingIfNeeded: running)
+        }
+
+        var out = Data([0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03])
+        out.append(contentsOf: dstBuffer[..<compressedCount])
+        var crcLE = crc.littleEndian
+        var sizeLE = UInt32(truncatingIfNeeded: data.count).littleEndian
+        withUnsafeBytes(of: &crcLE) { out.append(contentsOf: $0) }
+        withUnsafeBytes(of: &sizeLE) { out.append(contentsOf: $0) }
+        return out
+    }
+
+    private func sendHTTPResponseAndCloseOnQueue(connection: NWConnection, data: Data) {
+        let closeGate = ConnectionCloseGate()
+        let finishClose: @Sendable (LiveShareManager?, NWConnection?) -> Void = { manager, conn in
+            guard !closeGate.didClose else { return }
+            closeGate.didClose = true
+            guard let conn else { return }
+            manager?.untrackHTTPConnectionOnQueue(conn)
+            conn.stateUpdateHandler = nil
+            conn.cancel()
+        }
+
+        let sendTimeout = DispatchWorkItem { [weak self, weak connection] in
+            finishClose(self, connection)
+        }
+        let sendTimeoutToken = HeaderTimeoutToken(sendTimeout)
+        serverQueue.asyncAfter(deadline: .now() + 20.0, execute: sendTimeout)
+        connection.send(content: data, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed({ [weak self, weak connection] sendError in
+            sendTimeoutToken.cancel()
+            guard let connection else { return }
+            if sendError != nil || closeGate.didClose {
+                finishClose(self, connection)
+                return
+            }
+            guard let self else {
+                finishClose(nil, connection)
+                return
+            }
+            let graceClose = DispatchWorkItem { [weak self, weak connection] in
+                finishClose(self, connection)
+            }
+            let graceToken = HeaderTimeoutToken(graceClose)
+            self.serverQueue.asyncAfter(deadline: .now() + 0.5, execute: graceClose)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self, weak connection] _, _, _, _ in
+                graceToken.cancel()
+                finishClose(self, connection)
+            }
+        }))
+    }
+
     private func sendSimpleResponse(connection: NWConnection, status: String, body: String, includeBody: Bool = true) {
         let bodyData = Data(body.utf8)
         let header = "HTTP/1.1 \(status)\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(bodyData.count)\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
@@ -686,25 +1280,56 @@ public final class LiveShareManager: @unchecked Sendable {
         if includeBody {
             fullData.append(bodyData)
         }
-        connection.send(content: fullData, completion: .contentProcessed({ _ in
-            connection.cancel()
-        }))
+        sendHTTPResponseAndCloseOnQueue(connection: connection, data: fullData)
     }
 
-    private func handleServeHTMLOnQueue(_ connection: NWConnection, token: String, encryptPayloads: Bool, includeBody: Bool = true) {
-        let html = ReceiverWebAppHTML.html(forToken: token, encryptPayloads: encryptPayloads)
-        let data = Data(html.utf8)
+    private func handleServeHTMLOnQueue(
+        _ connection: NWConnection,
+        token: String,
+        encryptPayloads: Bool,
+        includeBody: Bool = true,
+        acceptLanguage: String? = nil,
+        acceptsGzip: Bool = false
+    ) {
+        let langKey = ReceiverWebAppHTML.resolvedLanguageKey(acceptLanguage: acceptLanguage)
+        let cacheKey = HTMLCacheKey(token: token, resolvedLang: langKey, encryptPayloads: encryptPayloads)
+        var cached: CachedHTMLResponse
+        if let existing = htmlResponseCache[cacheKey] {
+            cached = existing
+        } else {
+            let html = ReceiverWebAppHTML.html(
+                forToken: token,
+                encryptPayloads: encryptPayloads,
+                acceptLanguage: acceptLanguage
+            )
+            cached = CachedHTMLResponse(rawData: Data(html.utf8))
+            htmlResponseCache[cacheKey] = cached
+        }
+
+        let rawData = cached.rawData
+        let compressed: Data?
+        if acceptsGzip && rawData.count >= 256 {
+            if !cached.didComputeGzip {
+                cached.gzipData = Self.gzipCompress(rawData)
+                cached.didComputeGzip = true
+                htmlResponseCache[cacheKey] = cached
+            }
+            compressed = cached.gzipData
+        } else {
+            compressed = nil
+        }
+        let isGzipped = compressed != nil && compressed!.count < rawData.count
+        let responseBody = isGzipped ? compressed! : rawData
+        let encodingHeader = isGzipped ? "Content-Encoding: gzip\r\n" : ""
         let csp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-        let header = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(data.count)\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: \(csp)\r\nCross-Origin-Resource-Policy: same-origin\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\nCache-Control: no-cache, no-store, must-revalidate\r\n\r\n"
+        let header = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\(encodingHeader)Content-Length: \(responseBody.count)\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: \(csp)\r\nCross-Origin-Resource-Policy: same-origin\r\nReferrer-Policy: no-referrer\r\nVary: Accept-Encoding, Accept-Language\r\nConnection: close\r\nCache-Control: no-cache, no-store, must-revalidate\r\n\r\n"
 
         var fullData = Data(header.utf8)
         if includeBody {
-            fullData.append(data)
+            fullData.append(responseBody)
         }
 
-        connection.send(content: fullData, completion: .contentProcessed({ _ in
-            connection.cancel()
-        }))
+        sendHTTPResponseAndCloseOnQueue(connection: connection, data: fullData)
     }
 
     private struct APIStateResponse: Codable, Sendable {
@@ -718,7 +1343,10 @@ public final class LiveShareManager: @unchecked Sendable {
         let clearEpoch: UInt64
     }
 
-    private func handleAPIStateOnQueue(_ connection: NWConnection, encryptPayloads: Bool, includeBody: Bool = true, epoch: UInt64) {
+    private func handleAPIStateOnQueue(_ connection: NWConnection, encryptPayloads: Bool, includeBody: Bool = true, epoch: UInt64, viewerID: String? = nil) {
+        if includeBody, let viewerID {
+            registerPollingViewerOnQueue(viewerID, epoch: epoch)
+        }
         let (responseModel, crypto) = lock.withLock { state -> (APIStateResponse?, LiveShareCrypto?) in
             guard state.isSharing && state.sessionEpoch == epoch else { return (nil, nil) }
             let model = APIStateResponse(
@@ -735,11 +1363,13 @@ public final class LiveShareManager: @unchecked Sendable {
         }
 
         guard let responseModel else {
+            untrackHTTPConnectionOnQueue(connection)
             connection.cancel()
             return
         }
 
         guard let jsonData = try? jsonEncoder.encode(responseModel) else {
+            untrackHTTPConnectionOnQueue(connection)
             connection.cancel()
             return
         }
@@ -751,6 +1381,7 @@ public final class LiveShareManager: @unchecked Sendable {
             responseData = jsonData
         }
         guard let responseData else {
+            untrackHTTPConnectionOnQueue(connection)
             connection.cancel()
             return
         }
@@ -761,26 +1392,36 @@ public final class LiveShareManager: @unchecked Sendable {
             fullData.append(responseData)
         }
 
-        connection.send(content: fullData, completion: .contentProcessed({ _ in
-            connection.cancel()
-        }))
+        sendHTTPResponseAndCloseOnQueue(connection: connection, data: fullData)
     }
 
-    private func handleSSEConnectionOnQueue(_ connection: NWConnection, encryptPayloads: Bool, epoch: UInt64) {
+    private func handleSSEConnectionOnQueue(_ connection: NWConnection, encryptPayloads: Bool, epoch: UInt64, viewerID: String? = nil) {
         guard sseClients.count + pendingSSEHandshakes.count < maxSSEClients else {
             sendSimpleResponse(connection: connection, status: "503 Service Unavailable", body: "Server busy")
             return
         }
 
+        untrackHTTPConnectionOnQueue(connection)
         let headerData = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache, no-transform\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: keep-alive\r\n\r\n".utf8)
 
-        let client = SSEClient(connection: connection, encryptPayloads: encryptPayloads)
+        let client = SSEClient(connection: connection, encryptPayloads: encryptPayloads, viewerID: viewerID)
         let id = client.id
         pendingSSEHandshakes[id] = connection
+
+        let handshakeTimeout = DispatchWorkItem { [weak self, weak connection] in
+            guard let self = self else { return }
+            if self.pendingSSEHandshakes.removeValue(forKey: id) != nil {
+                connection?.stateUpdateHandler = nil
+                connection?.cancel()
+            }
+        }
+        let handshakeTimeoutToken = HeaderTimeoutToken(handshakeTimeout)
+        serverQueue.asyncAfter(deadline: .now() + 5.0, execute: handshakeTimeout)
 
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed, .cancelled:
+                handshakeTimeoutToken.cancel()
                 self?.pendingSSEHandshakes.removeValue(forKey: id)
                 self?.removeSSEClientOnQueue(id: id)
             default:
@@ -789,6 +1430,7 @@ public final class LiveShareManager: @unchecked Sendable {
         }
 
         connection.send(content: headerData, completion: .contentProcessed { [weak self] error in
+            handshakeTimeoutToken.cancel()
             guard let self = self else { return }
             let wasPending = self.pendingSSEHandshakes.removeValue(forKey: id) != nil
             guard wasPending, error == nil else {
@@ -805,6 +1447,14 @@ public final class LiveShareManager: @unchecked Sendable {
             }
 
             self.sseClients[id] = client
+            if let viewerID, self.pollingViewers.removeValue(forKey: viewerID) != nil {
+                let earliest = self.pollingViewers.values.min()
+                self.schedulePollingPruneOnQueue(
+                    nextExpiration: earliest,
+                    now: ProcessInfo.processInfo.systemUptime,
+                    epoch: epoch
+                )
+            }
             self.updateActiveClientCountOnQueue(excluding: id)
             self.startHeartbeatIfNeededOnQueue()
             self.receiveSSEDrainOnQueue(connection: connection, clientID: id)
@@ -892,8 +1542,54 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
+    private func pruneExpiredPollingViewersOnQueue(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> TimeInterval? {
+        guard !pollingViewers.isEmpty else { return nil }
+        pollingViewers = pollingViewers.filter { $0.value > now }
+        return pollingViewers.values.min()
+    }
+
+    private func schedulePollingPruneOnQueue(nextExpiration: TimeInterval?, now: TimeInterval, epoch: UInt64) {
+        pollingPruneWorkItem?.cancel()
+        pollingPruneWorkItem = nil
+        guard let nextExpiration else { return }
+        let delay = max(0.25, (nextExpiration - now) + 0.1)
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.pollingPruneWorkItem = nil
+            let currentNow = ProcessInfo.processInfo.systemUptime
+            let earliest = self.pruneExpiredPollingViewersOnQueue(now: currentNow)
+            self.updateActiveClientCountOnQueue()
+            let stillActive = self.lock.withLock { $0.isSharing && $0.sessionEpoch == epoch }
+            if stillActive, let earliest {
+                self.schedulePollingPruneOnQueue(nextExpiration: earliest, now: currentNow, epoch: epoch)
+            }
+        }
+        pollingPruneWorkItem = item
+        serverQueue.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    private func registerPollingViewerOnQueue(_ viewerID: String, epoch: UInt64) {
+        let isStillActive = lock.withLock { $0.isSharing && $0.sessionEpoch == epoch }
+        guard isStillActive else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        _ = pruneExpiredPollingViewersOnQueue(now: now)
+        if pollingViewers[viewerID] != nil || pollingViewers.count < 100 {
+            pollingViewers[viewerID] = now + pollingViewerTTL
+        }
+        let earliest = pollingViewers.values.min()
+        schedulePollingPruneOnQueue(nextExpiration: earliest, now: now, epoch: epoch)
+        updateActiveClientCountOnQueue()
+    }
+
     private func updateActiveClientCountOnQueue(excluding excludedClientID: ObjectIdentifier? = nil) {
-        let count = sseClients.count
+        _ = pruneExpiredPollingViewersOnQueue()
+        let sseViewerIDs = Set(sseClients.values.compactMap(\.viewerID))
+        let uniquePollingCount = pollingViewers.keys.reduce(into: 0) { count, viewerID in
+            if !sseViewerIDs.contains(viewerID) {
+                count += 1
+            }
+        }
+        let count = sseClients.count + uniquePollingCount
         let (changed, epoch) = lock.withLock { state -> (Bool, UInt64) in
             guard state.activeClientCount != count else { return (false, state.sessionEpoch) }
             state.activeClientCount = count
@@ -909,7 +1605,7 @@ public final class LiveShareManager: @unchecked Sendable {
         guard pingTimer == nil, !sseClients.isEmpty else { return }
         let timer = DispatchSource.makeTimerSource(queue: serverQueue)
         timer.schedule(deadline: .now() + 15.0, repeating: 15.0, leeway: .seconds(2))
-        let pingData = Data(": ping\n\n".utf8)
+        let pingData = Self.makeSSEFrame(event: "ping", payload: Data("{}".utf8))
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
             if self.sseClients.isEmpty {
@@ -930,7 +1626,7 @@ public final class LiveShareManager: @unchecked Sendable {
     }
 
 
-    public func broadcastCaption(
+    func broadcastCaption(
         speaker: String,
         original: String,
         translated: String,
@@ -943,32 +1639,23 @@ public final class LiveShareManager: @unchecked Sendable {
         guard isSharing else { return }
 
         let now = Date()
-        let timeStr = Self.formatterLock.withLock {
-            Self.timeFormatter.string(from: now)
-        }
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        let idStr = utteranceID.uuidString
+        let isCaller = speaker.lowercased() == "caller"
 
         let (event, epoch, clearGen, crypto): (LiveCaptionEvent?, UInt64, UInt64, LiveShareCrypto?) = lock.withLock { state -> (LiveCaptionEvent?, UInt64, UInt64, LiveShareCrypto?) in
             guard state.isSharing else { return (nil, 0, 0, nil) }
-            if !state.shareBothSpeakers && speaker.lowercased() == "caller" {
+            if !state.shareBothSpeakers && isCaller {
                 return (nil, 0, 0, nil)
             }
             if isFinal {
-                var eventToBroadcast = LiveCaptionEvent(
-                    id: utteranceID.uuidString,
-                    timestamp: timeStr,
-                    speaker: speaker,
-                    originalText: original,
-                    translatedText: translated,
-                    sourceLangCode: sourceLangCode,
-                    targetLangCode: targetLangCode,
-                    isFinal: true,
-                    isUntranslated: isUntranslated
-                )
-                if let idx = state.history.firstIndex(where: { $0.id == eventToBroadcast.id }) {
+                var eventToBroadcast: LiveCaptionEvent
+                if let idx = state.history.firstIndex(where: { $0.id == idStr }) {
                     let prev = state.history[idx]
                     eventToBroadcast = LiveCaptionEvent(
                         id: prev.id,
                         timestamp: prev.timestamp,
+                        timestampMs: prev.timestampMs,
                         speaker: speaker,
                         originalText: original,
                         translatedText: translated,
@@ -979,25 +1666,49 @@ public final class LiveShareManager: @unchecked Sendable {
                     )
                     state.history[idx] = eventToBroadcast
                 } else {
+                    let locale = AppL10n.effectiveUILocale
+                    let timeStr = Self.formatterLock.withLock {
+                        if Self.timeFormatter.locale != locale {
+                            Self.timeFormatter.locale = locale
+                        }
+                        return Self.timeFormatter.string(from: now)
+                    }
+                    eventToBroadcast = LiveCaptionEvent(
+                        id: idStr,
+                        timestamp: timeStr,
+                        timestampMs: nowMs,
+                        speaker: speaker,
+                        originalText: original,
+                        translatedText: translated,
+                        sourceLangCode: sourceLangCode,
+                        targetLangCode: targetLangCode,
+                        isFinal: true,
+                        isUntranslated: isUntranslated
+                    )
                     state.history.append(eventToBroadcast)
                 }
 
                 if state.history.count > 100 {
                     state.history.removeFirst(state.history.count - 100)
                 }
-                if speaker.lowercased() == "caller" {
-                    state.callerPartial = nil
+                if isCaller {
+                    if state.callerPartial?.id == eventToBroadcast.id {
+                        state.callerPartial = nil
+                    }
                 } else {
-                    state.micPartial = nil
+                    if state.micPartial?.id == eventToBroadcast.id {
+                        state.micPartial = nil
+                    }
                 }
                 return (eventToBroadcast, state.sessionEpoch, state.clearGeneration, state.sessionCrypto)
             } else {
-                if state.history.contains(where: { $0.id == utteranceID.uuidString }) {
+                if state.history.contains(where: { $0.id == idStr }) {
                     return (nil, 0, 0, nil)
                 }
                 let partialEvent = LiveCaptionEvent(
-                    id: utteranceID.uuidString,
-                    timestamp: timeStr,
+                    id: idStr,
+                    timestamp: "",
+                    timestampMs: nowMs,
                     speaker: speaker,
                     originalText: original,
                     translatedText: translated,
@@ -1124,7 +1835,7 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
-    public func speakerSharingDidChange() {
+    func speakerSharingDidChange() {
         let shareCaller = lock.withLock { $0.shareBothSpeakers }
         guard !shareCaller else { return }
         let (changed, clearGen, shouldBroadcast, epoch) = lock.withLock { state -> (Bool, UInt64, Bool, UInt64) in
@@ -1143,7 +1854,7 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
-    public func clearHistoryForPrivacy() {
+    func clearHistoryForPrivacy() {
         let (changed, clearGen, shouldBroadcast, epoch) = lock.withLock { state -> (Bool, UInt64, Bool, UInt64) in
             let hadData = !state.history.isEmpty || state.callerPartial != nil || state.micPartial != nil
             state.history.removeAll()
@@ -1160,8 +1871,12 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
-    public func broadcastPauseState(_ paused: Bool) {
+    func broadcastPauseState(_ paused: Bool) {
         let (changed, viewerCount, epoch) = lock.withLock { state -> (Bool, Int, UInt64) in
+            if paused {
+                state.callerPartial = nil
+                state.micPartial = nil
+            }
             guard state.isSharing, state.isPaused != paused else { return (false, 0, 0) }
             state.isPaused = paused
             return (true, state.activeClientCount, state.sessionEpoch)
@@ -1184,7 +1899,7 @@ public final class LiveShareManager: @unchecked Sendable {
         return base.appendingPathComponent("CallCaption", isDirectory: true)
     }()
 
-    public static func ensurePrivateDirectory(_ url: URL, permissions: Int = 0o700) throws {
+    static func ensurePrivateDirectory(_ url: URL, permissions: Int = 0o700) throws {
         let standardizedURL = url.standardizedFileURL
         let appSupportURL = appSupportDirectory.standardizedFileURL
         if standardizedURL != appSupportURL,
@@ -1232,8 +1947,20 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
-    public static func writePrivateData(_ data: Data, to url: URL) throws {
-        let parentURL = url.deletingLastPathComponent().standardizedFileURL
+    static func writePrivateData(_ data: Data, to url: URL) throws {
+        let targetURL = url.standardizedFileURL
+        var targetStat = Darwin.stat()
+        if Darwin.lstat(targetURL.path, &targetStat) == 0 {
+            if (targetStat.st_mode & S_IFMT) == S_IFLNK {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(ELOOP),
+                    userInfo: [NSLocalizedDescriptionKey: "Refusing symlink file at \(targetURL.path)"]
+                )
+            }
+        }
+
+        let parentURL = targetURL.deletingLastPathComponent().standardizedFileURL
         var st = Darwin.stat()
         let needsEnsure: Bool
         if Darwin.lstat(parentURL.path, &st) == 0 {
@@ -1246,7 +1973,7 @@ public final class LiveShareManager: @unchecked Sendable {
             try ensurePrivateDirectory(parentURL, permissions: 0o700)
         }
 
-        let tempURL = parentURL.appendingPathComponent(".\(url.lastPathComponent).tmp.\(UUID().uuidString)")
+        let tempURL = parentURL.appendingPathComponent(".\(targetURL.lastPathComponent).tmp.\(UUID().uuidString)")
         let fd = Darwin.open(tempURL.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
         if fd < 0 {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
@@ -1277,38 +2004,159 @@ public final class LiveShareManager: @unchecked Sendable {
         if Darwin.close(fd) != 0 {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
-        if Darwin.rename(tempURL.path, url.path) != 0 {
+        if Darwin.rename(tempURL.path, targetURL.path) != 0 {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
         moved = true
     }
 
-    public static let pinnedSSHKnownHosts: String = """
+    static let pinnedSSHKnownHosts: String = """
     localhost.run,*.localhost.run,ssh.localhost.run,*.lhr.life ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9
     localhost.run,*.localhost.run,ssh.localhost.run,*.lhr.life ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC3lJnhW1oCXuAYV9IBdcJA+Vx7AHL5S/ZQvV2fhceOAPgO2kNQZla6xvUwoE4iw8lYu3zoE1KtieCU9yInWOVI6W/wFaT/ETH1tn55T2FVsK/zaxPiHZVJGLPPdEEid0vS2p1JDfc9onZ0pNSHLl1QusIOeMUyZ2bUMMLLgw46KOT9S3s/LmxgoJ3PocVUn5rVXz/Dng7Y8jYNe4IFrZOAUsi7hNBa+OYja6ceefpDvNDEJ1BdhbYfGolBdNA7f+FNl0kfaWru4Cblr843wBe2ckO/sNqgeAMXO/qH+SSgQxUXF2AgAw+TGp3yCIyYoOPvOgvcPsQziJLmDbUuQpnH
     """ + "\n"
 
-    public static func ensureSSHKnownHostsPopulated(at url: URL) throws {
+    static func ensureSSHKnownHostsPopulated(at url: URL) throws {
         try ensurePrivateDirectory(url.deletingLastPathComponent())
-        let pinnedData = Data(pinnedSSHKnownHosts.utf8)
-        if !FileManager.default.fileExists(atPath: url.path) {
-            try writePrivateData(pinnedData, to: url)
-        } else {
-            let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-            if !existing.contains("AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9") {
-                let updated = pinnedSSHKnownHosts + (existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n" + existing)
-                try writePrivateData(Data(updated.utf8), to: url)
-            } else {
-                try? FileManager.default.setAttributes(
-                    [.posixPermissions: NSNumber(value: 0o600)],
-                    ofItemAtPath: url.path
+        let standardizedURL = url.standardizedFileURL
+        let expectedTrimmed = Self.pinnedSSHKnownHosts.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pinnedData = Data(Self.pinnedSSHKnownHosts.utf8)
+
+        var st = Darwin.stat()
+        if Darwin.lstat(standardizedURL.path, &st) == 0 {
+            let fileType = st.st_mode & S_IFMT
+            if fileType == S_IFLNK {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(ELOOP),
+                    userInfo: [NSLocalizedDescriptionKey: "Refusing symlink file at \(standardizedURL.path)"]
                 )
             }
+            if fileType == S_IFREG {
+                let fd = Darwin.open(standardizedURL.path, O_RDONLY | O_NOFOLLOW)
+                if fd >= 0 {
+                    defer { Darwin.close(fd) }
+                    var existingData = Data()
+                    var buf = [UInt8](repeating: 0, count: 4096)
+                    while existingData.count < 65536 {
+                        let n = Darwin.read(fd, &buf, buf.count)
+                        if n < 0 && errno == EINTR { continue }
+                        if n <= 0 { break }
+                        existingData.append(contentsOf: buf[..<n])
+                    }
+                    let existing = String(data: existingData, encoding: .utf8) ?? ""
+                    if existing.trimmingCharacters(in: .whitespacesAndNewlines) == expectedTrimmed {
+                        if (Int(st.st_mode) & 0o777) != 0o600 {
+                            _ = Darwin.fchmod(fd, mode_t(0o600))
+                        }
+                        return
+                    }
+                }
+            }
+        }
+        try writePrivateData(pinnedData, to: standardizedURL)
+    }
+
+    static var sshKnownHostsURL: URL {
+        appSupportDirectory.appendingPathComponent("ssh_known_hosts")
+    }
+
+    static var sshTunnelPIDURL: URL {
+        appSupportDirectory.appendingPathComponent("ssh_tunnel.pid")
+    }
+
+    private static func readNoFollowTextFile(at url: URL, maxBytes: Int = 256) -> String? {
+        let path = url.standardizedFileURL.path
+        var st = Darwin.stat()
+        guard Darwin.lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return nil }
+        let fd = Darwin.open(path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { return nil }
+        defer { Darwin.close(fd) }
+        var data = Data()
+        var buf = [UInt8](repeating: 0, count: min(512, maxBytes))
+        while data.count < maxBytes {
+            let n = Darwin.read(fd, &buf, min(buf.count, maxBytes - data.count))
+            if n < 0 && errno == EINTR { continue }
+            if n <= 0 { break }
+            data.append(contentsOf: buf[..<n])
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func writeSSHTunnelPIDFile(_ pid: Int32) {
+        guard pid > 1 else { return }
+        try? writePrivateData(Data("\(pid)\n".utf8), to: sshTunnelPIDURL)
+    }
+
+    private static func removeSSHTunnelPIDFile(matchingPID: Int32? = nil) {
+        let url = sshTunnelPIDURL.standardizedFileURL
+        if let matchingPID {
+            if let content = readNoFollowTextFile(at: url),
+               let storedPID = Int32(content.trimmingCharacters(in: .whitespacesAndNewlines)),
+               storedPID != matchingPID {
+                return
+            }
+        }
+        _ = Darwin.unlink(url.path)
+    }
+
+    private static func isOrphanedSSHTunnelProcess(pid: Int32) -> Bool {
+        guard pid > 1, pid != getpid(), Darwin.kill(pid, 0) == 0 else { return false }
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size: Int = 0
+        if Darwin.sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size, size <= 65536 {
+            var buffer = [UInt8](repeating: 0, count: size)
+            if Darwin.sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size {
+                let slice = buffer[MemoryLayout<Int32>.size..<size].map { $0 == 0 ? UInt8(0x20) : $0 }
+                let commandLine = String(decoding: slice, as: UTF8.self).lowercased()
+                if commandLine.contains("ssh") && commandLine.contains("localhost.run") {
+                    return true
+                }
+            }
+        }
+        let ps = Process()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+        ps.arguments = ["-p", "\(pid)", "-o", "command="]
+        let pipe = Pipe()
+        ps.standardOutput = pipe
+        ps.standardError = FileHandle.nullDevice
+        do {
+            try ps.run()
+            try? pipe.fileHandleForWriting.close()
+            let outputData = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
+            try? pipe.fileHandleForReading.close()
+            ps.waitUntilExit()
+            let cmd = String(decoding: outputData, as: UTF8.self).lowercased()
+            return cmd.contains("ssh") && cmd.contains("localhost.run")
+        } catch {
+            try? pipe.fileHandleForWriting.close()
+            try? pipe.fileHandleForReading.close()
+            return false
         }
     }
 
-    public static var sshKnownHostsURL: URL {
-        appSupportDirectory.appendingPathComponent("ssh_known_hosts")
+    static func reapOrphanedSSHTunnelIfNeeded() {
+        let url = sshTunnelPIDURL.standardizedFileURL
+        guard let content = readNoFollowTextFile(at: url) else {
+            var st = Darwin.stat()
+            if Darwin.lstat(url.path, &st) == 0 {
+                _ = Darwin.unlink(url.path)
+            }
+            return
+        }
+        _ = Darwin.unlink(url.path)
+        guard let pid = Int32(content.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid > 1,
+              pid != getpid(),
+              isOrphanedSSHTunnelProcess(pid: pid) else {
+            return
+        }
+        _ = Darwin.kill(pid, SIGTERM)
+        for _ in 0..<3 where Darwin.kill(pid, 0) == 0 {
+            usleep(20_000)
+        }
+        if Darwin.kill(pid, 0) == 0 {
+            _ = Darwin.kill(pid, SIGKILL)
+        }
     }
 
     private func startTunnelProcessOnQueue(port: UInt16, epoch: UInt64) {
@@ -1331,12 +2179,20 @@ public final class LiveShareManager: @unchecked Sendable {
             return
         }
 
+        if ProcessInfo.processInfo.environment["CALLCAPTION_TEST"] == "1" {
+            terminateTunnelProcessOnQueue()
+            return
+        }
+
         let knownHostsURL = Self.sshKnownHostsURL
         do {
             try Self.ensureSSHKnownHostsPopulated(at: knownHostsURL)
         } catch {
-            AppLog.liveShare.error("Failed to prepare SSH known-hosts path: \(error.localizedDescription, privacy: .public)")
-            markTunnelFailed(epoch: epoch, message: "Tunnel unavailable")
+            AppLog.liveShare.error("Failed to prepare SSH known-hosts path: \(error.localizedDescription, privacy: .private)")
+            markTunnelFailed(
+                epoch: epoch,
+                message: AppL10n.string("share.tunnel.unavailable", fallback: "Tunnel unavailable")
+            )
             return
         }
 
@@ -1345,7 +2201,7 @@ public final class LiveShareManager: @unchecked Sendable {
         launchSSHTunnelOnQueue(port: port, epoch: epoch, knownHostsURL: knownHostsURL)
     }
 
-    public static func buildSSHTunnelArguments(port: UInt16, knownHostsURL: URL) -> [String] {
+    static func buildSSHTunnelArguments(port: UInt16, knownHostsURL: URL) -> [String] {
         let quotedKnownHostsPath = "\"\(knownHostsURL.path.replacingOccurrences(of: "\"", with: ""))\""
         return [
             "-F", "/dev/null",
@@ -1361,6 +2217,7 @@ public final class LiveShareManager: @unchecked Sendable {
             "-o", "PermitLocalCommand=no",
             "-o", "StrictHostKeyChecking=yes",
             "-o", "CheckHostIP=no",
+            "-o", "GlobalKnownHostsFile=/dev/null",
             "-o", "UserKnownHostsFile=\(quotedKnownHostsPath)",
             "-o", "ExitOnForwardFailure=yes",
             "-o", "ConnectTimeout=10",
@@ -1371,11 +2228,77 @@ public final class LiveShareManager: @unchecked Sendable {
         ]
     }
 
+    @discardableResult
+    private func drainTunnelPipeNonBlockingOnQueue(fd: Int32, epoch: UInt64) -> Bool {
+        guard fd >= 0 else { return true }
+        var drained = Data()
+        var scratch = [UInt8](repeating: 0, count: 4096)
+        var reachedEOF = false
+        while drained.count < 32768 {
+            let n = Darwin.read(fd, &scratch, scratch.count)
+            if n > 0 {
+                drained.append(contentsOf: scratch[..<n])
+            } else if n == 0 {
+                reachedEOF = true
+                break
+            } else {
+                let err = errno
+                if err == EINTR {
+                    continue
+                }
+                if err != EAGAIN && err != EWOULDBLOCK {
+                    reachedEOF = true
+                }
+                break
+            }
+        }
+        if !drained.isEmpty {
+            let chunk = Self.decodeUTF8Chunk(newData: drained, remainder: &tunnelPartialUTF8Data)
+            if !chunk.isEmpty {
+                appendAndScanTunnelOutputOnQueue(chunk, epoch: epoch)
+            }
+        }
+        return reachedEOF
+    }
+
+    static func drainCompleteLines(from pendingBuffer: inout String, appending chunk: String) -> [String] {
+        pendingBuffer.append(chunk)
+        var lines: [String] = []
+        // Use `.literal` so `\r\n` (a single Swift Character grapheme cluster) still matches `\n`.
+        while let newlineRange = pendingBuffer.range(of: "\n", options: .literal) {
+            let line = String(pendingBuffer[..<newlineRange.lowerBound])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+            pendingBuffer.removeSubrange(..<newlineRange.upperBound)
+            if !line.isEmpty {
+                lines.append(line)
+            }
+        }
+        if pendingBuffer.count > 16384 {
+            pendingBuffer = String(pendingBuffer.suffix(4096))
+        }
+        return lines
+    }
+
+    private func appendAndScanTunnelOutputOnQueue(_ chunk: String, epoch: UInt64) {
+        tunnelOutputBuffer.append(chunk)
+        if tunnelOutputBuffer.count > 32768 {
+            tunnelOutputBuffer = String(tunnelOutputBuffer.suffix(8192))
+        }
+        for line in Self.drainCompleteLines(from: &tunnelPendingLineBuffer, appending: chunk) {
+            parseTunnelOutputLine(line, regex: Self.sshTunnelRegex, epoch: epoch)
+        }
+    }
+
     private func launchSSHTunnelOnQueue(port: UInt16, epoch: UInt64, knownHostsURL: URL) {
+        if ProcessInfo.processInfo.environment["CALLCAPTION_TEST"] == "1" {
+            return
+        }
         let (isStillValid, useExternalTunnel) = lock.withLock {
             ($0.isSharing && $0.sessionEpoch == epoch, $0.useExternalTunnel)
         }
         guard isStillValid, useExternalTunnel else { return }
+
+        Self.reapOrphanedSSHTunnelIfNeeded()
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -1386,63 +2309,43 @@ public final class LiveShareManager: @unchecked Sendable {
         process.standardOutput = pipe
         process.standardError = pipe
 
+        self.tunnelReadSource?.cancel()
+        self.tunnelReadSource = nil
         self.tunnelProcess = process
         self.tunnelPipe = pipe
         self.tunnelGeneration &+= 1
         let launchGen = self.tunnelGeneration
         self.tunnelOutputBuffer = ""
+        self.tunnelPendingLineBuffer = ""
+        self.hasEstablishedTunnelURLInGeneration = false
         self.tunnelPartialUTF8Data.removeAll(keepingCapacity: false)
         self.tunnelConnectedUptime = 0
 
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            guard let self = self else { return }
-            let data = handle.availableData
-            guard !data.isEmpty else {
-                handle.readabilityHandler = nil
-                return
-            }
-            self.serverQueue.async { [weak self] in
-                guard let self = self,
-                      self.tunnelGeneration == launchGen,
-                      self.tunnelPipe != nil,
-                      self.tunnelProcess != nil else { return }
-                let chunk = Self.decodeUTF8Chunk(newData: data, remainder: &self.tunnelPartialUTF8Data)
-                guard !chunk.isEmpty else { return }
-                self.tunnelOutputBuffer.append(chunk)
-                self.parseTunnelOutput(self.tunnelOutputBuffer, regex: Self.sshTunnelRegex, epoch: epoch)
-                if self.tunnelOutputBuffer.count > 32768 {
-                    self.tunnelOutputBuffer = String(self.tunnelOutputBuffer.suffix(8192))
-                }
-            }
-        }
+        let readHandle = pipe.fileHandleForReading
 
         process.terminationHandler = { [weak self] proc in
             guard let self = self else { return }
             let status = proc.terminationStatus
-            self.serverQueue.async {
+            let pid = proc.processIdentifier
+            self.serverQueue.async { [weak self] in
+                guard let self = self else { return }
+                Self.removeSSHTunnelPIDFile(matchingPID: pid)
+                if self.terminatingTunnelProcess === proc {
+                    self.terminatingTunnelProcess = nil
+                }
                 guard self.tunnelGeneration == launchGen,
                       self.tunnelProcess != nil else { return }
-                if let handle = self.tunnelPipe?.fileHandleForReading {
-                    handle.readabilityHandler = nil
-                    let fd = handle.fileDescriptor
-                    let prevFlags = Darwin.fcntl(fd, F_GETFL)
-                    if prevFlags != -1 {
-                        _ = Darwin.fcntl(fd, F_SETFL, prevFlags | O_NONBLOCK)
+                if let activeSource = self.tunnelReadSource {
+                    let fd = readHandle.fileDescriptor
+                    if fd >= 0 {
+                        let prevFlags = Darwin.fcntl(fd, F_GETFL)
+                        if prevFlags != -1 && (prevFlags & O_NONBLOCK) == 0 {
+                            _ = Darwin.fcntl(fd, F_SETFL, prevFlags | O_NONBLOCK)
+                        }
+                        self.drainTunnelPipeNonBlockingOnQueue(fd: fd, epoch: epoch)
                     }
-                    var drained = Data()
-                    var scratch = [UInt8](repeating: 0, count: 4096)
-                    while drained.count < 32768 {
-                        let n = Darwin.read(fd, &scratch, scratch.count)
-                        if n <= 0 { break }
-                        drained.append(contentsOf: scratch[..<n])
-                    }
-                    if prevFlags != -1 {
-                        _ = Darwin.fcntl(fd, F_SETFL, prevFlags)
-                    }
-                    if !drained.isEmpty {
-                        let chunk = Self.decodeUTF8Chunk(newData: drained, remainder: &self.tunnelPartialUTF8Data)
-                        self.tunnelOutputBuffer.append(chunk)
-                    }
+                    self.tunnelReadSource = nil
+                    activeSource.cancel()
                 }
                 let tailSnippet = String(self.tunnelOutputBuffer.suffix(300))
                     .replacingOccurrences(of: "\r", with: " ")
@@ -1451,17 +2354,48 @@ public final class LiveShareManager: @unchecked Sendable {
                 self.tunnelGeneration &+= 1
                 self.tunnelProcess = nil
                 self.tunnelPipe = nil
-                self.tunnelOutputBuffer = ""
+                self.tunnelPendingLineBuffer = ""
+                self.hasEstablishedTunnelURLInGeneration = false
                 self.tunnelPartialUTF8Data.removeAll(keepingCapacity: false)
                 self.handleTunnelTerminatedOnQueue(epoch: epoch)
+                self.tunnelOutputBuffer = ""
             }
         }
 
         do {
             try process.run()
+            let pid = process.processIdentifier
+            Self.writeSSHTunnelPIDFile(pid)
+            try? pipe.fileHandleForWriting.close()
+            let readFD = readHandle.fileDescriptor
+            if readFD >= 0 {
+                let flags = Darwin.fcntl(readFD, F_GETFL)
+                if flags != -1 {
+                    _ = Darwin.fcntl(readFD, F_SETFL, flags | O_NONBLOCK)
+                }
+                let source = DispatchSource.makeReadSource(fileDescriptor: readFD, queue: serverQueue)
+                source.setEventHandler { [weak self] in
+                    guard let self = self,
+                          self.tunnelGeneration == launchGen,
+                          self.tunnelPipe != nil,
+                          self.tunnelProcess != nil else { return }
+                    let reachedEOF = self.drainTunnelPipeNonBlockingOnQueue(fd: readFD, epoch: epoch)
+                    if reachedEOF, let activeSource = self.tunnelReadSource {
+                        self.tunnelReadSource = nil
+                        self.tunnelPipe = nil
+                        activeSource.cancel()
+                    }
+                }
+                source.setCancelHandler {
+                    try? readHandle.close()
+                }
+                self.tunnelReadSource = source
+                source.resume()
+            }
         } catch {
-            pipe.fileHandleForReading.readabilityHandler = nil
             process.terminationHandler = nil
+            try? pipe.fileHandleForWriting.close()
+            try? readHandle.close()
             if self.tunnelGeneration == launchGen {
                 self.tunnelGeneration &+= 1
                 self.tunnelProcess = nil
@@ -1482,35 +2416,71 @@ public final class LiveShareManager: @unchecked Sendable {
         tunnelConnectedUptime = 0
         tunnelGeneration &+= 1
 
-        tunnelPipe?.fileHandleForReading.readabilityHandler = nil
+        if let readSource = tunnelReadSource {
+            tunnelReadSource = nil
+            readSource.cancel()
+        } else if let pipe = tunnelPipe {
+            try? pipe.fileHandleForReading.close()
+        }
         tunnelPipe = nil
         tunnelOutputBuffer = ""
+        tunnelPendingLineBuffer = ""
+        hasEstablishedTunnelURLInGeneration = false
         tunnelPartialUTF8Data.removeAll(keepingCapacity: false)
 
-        if let proc = tunnelProcess {
+        let activeProc = tunnelProcess
+        tunnelProcess = nil
+
+        if let proc = activeProc {
             proc.terminationHandler = nil
+            let pid = proc.processIdentifier
             if proc.isRunning {
                 proc.terminate()
                 if forceKillSynchronously {
                     for _ in 0..<3 where proc.isRunning {
                         usleep(20_000)
                     }
-                }
-                if proc.isRunning {
-                    let pid = proc.processIdentifier
-                    if forceKillSynchronously {
+                    if proc.isRunning {
                         _ = Darwin.kill(pid, SIGKILL)
-                    } else {
-                        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.35) {
-                            if proc.isRunning {
-                                _ = Darwin.kill(pid, SIGKILL)
-                            }
+                    }
+                    if terminatingTunnelProcess === proc {
+                        terminatingTunnelProcess = nil
+                    }
+                    Self.removeSSHTunnelPIDFile(matchingPID: pid)
+                } else {
+                    if let prevTerm = terminatingTunnelProcess, prevTerm !== proc, prevTerm.isRunning {
+                        _ = Darwin.kill(prevTerm.processIdentifier, SIGKILL)
+                    }
+                    terminatingTunnelProcess = proc
+                    serverQueue.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                        if proc.isRunning {
+                            _ = Darwin.kill(pid, SIGKILL)
                         }
+                        if self?.terminatingTunnelProcess === proc {
+                            self?.terminatingTunnelProcess = nil
+                        }
+                        Self.removeSSHTunnelPIDFile(matchingPID: pid)
                     }
                 }
+            } else {
+                Self.removeSSHTunnelPIDFile(matchingPID: pid)
             }
         }
-        tunnelProcess = nil
+
+        if forceKillSynchronously, let termProc = terminatingTunnelProcess {
+            terminatingTunnelProcess = nil
+            let pid = termProc.processIdentifier
+            if termProc.isRunning {
+                termProc.terminate()
+                for _ in 0..<3 where termProc.isRunning {
+                    usleep(20_000)
+                }
+                if termProc.isRunning {
+                    _ = Darwin.kill(pid, SIGKILL)
+                }
+            }
+            Self.removeSSHTunnelPIDFile(matchingPID: pid)
+        }
     }
 
     private func scheduleTunnelStartupTimeout(epoch: UInt64, port: UInt16) {
@@ -1529,6 +2499,8 @@ public final class LiveShareManager: @unchecked Sendable {
     }
 
     private func handleTunnelTerminatedOnQueue(epoch: UInt64) {
+        let recentOutput = tunnelOutputBuffer
+        tunnelOutputBuffer = ""
         let nowUptime = ProcessInfo.processInfo.systemUptime
         if tunnelConnectedUptime > 0, (nowUptime - tunnelConnectedUptime) >= 20.0 {
             tunnelRestartAttempts = 0
@@ -1555,8 +2527,24 @@ public final class LiveShareManager: @unchecked Sendable {
         }
         guard stillSharing, port > 0 else { return }
 
+        if recentOutput.contains("Host key verification failed")
+            || recentOutput.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
+            markTunnelFailed(
+                epoch: epoch,
+                message: AppL10n.string(
+                    "share.tunnel.host_key_failed",
+                    fallback: "Public tunnel blocked: SSH host key verification failed."
+                )
+            )
+            return
+        }
+
+        let tunnelFailedMessage = AppL10n.string(
+            "share.tunnel.failed",
+            fallback: "Public tunnel unavailable."
+        )
         guard tunnelRestartAttempts < 5 else {
-            markTunnelFailed(epoch: epoch, message: "Public tunnel unavailable. Retry from the Live Link banner.")
+            markTunnelFailed(epoch: epoch, message: tunnelFailedMessage)
             return
         }
 
@@ -1566,8 +2554,13 @@ public final class LiveShareManager: @unchecked Sendable {
             state.tunnelHost = nil
             state.isTunnelStarting = true
             state.tunnelError = hadPublicURL
-                ? "Public tunnel disconnected; reconnecting…"
-                : "Connecting to public tunnel (attempt \(min(5, tunnelRestartAttempts + 1))/5)…"
+                ? AppL10n.string("share.tunnel.reconnecting", fallback: "Public tunnel disconnected; reconnecting…")
+                : AppL10n.format(
+                    "share.tunnel.connecting_attempt",
+                    fallback: "Connecting to public tunnel (attempt %ld/%ld)…",
+                    min(5, tunnelRestartAttempts + 1),
+                    5
+                )
             return true
         }
         if updated { notifyStateChange() }
@@ -1582,8 +2575,12 @@ public final class LiveShareManager: @unchecked Sendable {
 
         terminateTunnelProcessOnQueue()
 
+        let tunnelFailedMessage = AppL10n.string(
+            "share.tunnel.failed",
+            fallback: "Public tunnel unavailable."
+        )
         guard tunnelRestartAttempts < 5 else {
-            markTunnelFailed(epoch: epoch, message: "Public tunnel unavailable. Retry from the Live Link banner.")
+            markTunnelFailed(epoch: epoch, message: tunnelFailedMessage)
             return
         }
 
@@ -1593,7 +2590,12 @@ public final class LiveShareManager: @unchecked Sendable {
             let updated = lock.withLock { state -> Bool in
                 guard state.isSharing && state.sessionEpoch == epoch else { return false }
                 state.isTunnelStarting = true
-                state.tunnelError = "Connecting to public tunnel (attempt \(min(5, attempt))/5)…"
+                state.tunnelError = AppL10n.format(
+                    "share.tunnel.connecting_attempt",
+                    fallback: "Connecting to public tunnel (attempt %ld/%ld)…",
+                    min(5, attempt),
+                    5
+                )
                 return true
             }
             if updated { notifyStateChange() }
@@ -1608,18 +2610,23 @@ public final class LiveShareManager: @unchecked Sendable {
         serverQueue.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
-    public func retryTunnel() {
+    func retryTunnel() {
         serverQueue.async { [weak self] in
             guard let self = self else { return }
-            let state = self.lock.withLock { ($0.isSharing, $0.sessionEpoch, $0.port) }
-            guard state.0, state.2 > 0 else { return }
-            self.tunnelRestartAttempts = 0
-            self.lock.withLock {
-                $0.tunnelError = nil
-                $0.isTunnelStarting = true
+            self.tunnelRestartWorkItem?.cancel()
+            self.tunnelRestartWorkItem = nil
+            let retryTarget: (epoch: UInt64, port: UInt16)? = self.lock.withLock { state in
+                guard state.isSharing, state.useExternalTunnel, state.port > 0 else { return nil }
+                state.publicURL = nil
+                state.tunnelHost = nil
+                state.tunnelError = nil
+                state.isTunnelStarting = true
+                return (state.sessionEpoch, state.port)
             }
+            guard let target = retryTarget else { return }
+            self.tunnelRestartAttempts = 0
             self.notifyStateChange()
-            self.startTunnelProcessOnQueue(port: state.2, epoch: state.1)
+            self.startTunnelProcessOnQueue(port: target.port, epoch: target.epoch)
         }
     }
 
@@ -1639,21 +2646,31 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
-    private func parseTunnelOutput(_ text: String, regex: NSRegularExpression, epoch: UInt64) {
-        guard let baseURL = Self.extractTunnelURL(from: text, regex: regex),
+    private func parseTunnelOutputLine(_ line: String, regex: NSRegularExpression, epoch: UInt64) {
+        if hasEstablishedTunnelURLInGeneration {
+            guard line.localizedCaseInsensitiveContains("tunneled with tls termination") else { return }
+        }
+        guard let baseURL = Self.extractTunnelURL(from: line, regex: regex),
               let host = baseURL.host else { return }
         let baseURLString = baseURL.absoluteString
 
-        let updatedURL: URL? = lock.withLock { state -> URL? in
-            guard state.isSharing && state.sessionEpoch == epoch else { return nil }
+        let (updatedURL, didEstablish): (URL?, Bool) = lock.withLock { state -> (URL?, Bool) in
+            guard state.isSharing && state.sessionEpoch == epoch else { return (nil, false) }
             guard !state.sessionKeyFragment.isEmpty,
-                  let tokenizedURL = URL(string: "\(baseURLString)/s/\(state.sessionToken)#\(state.sessionKeyFragment)") else { return nil }
-            if state.publicURL == tokenizedURL { return nil }
+                  let tokenizedURL = URL(string: "\(baseURLString)/s/\(state.sessionToken)#\(state.sessionKeyFragment)") else { return (nil, false) }
+            if state.publicURL == tokenizedURL { return (nil, true) }
+            if let previous = state.lastPublishedPublicURL, previous != tokenizedURL {
+                state.publicLinkRotated = true
+            }
+            state.lastPublishedPublicURL = tokenizedURL
             state.publicURL = tokenizedURL
             state.tunnelHost = host
             state.isTunnelStarting = false
             state.tunnelError = nil
-            return tokenizedURL
+            return (tokenizedURL, true)
+        }
+        if didEstablish {
+            hasEstablishedTunnelURLInGeneration = true
         }
         if updatedURL != nil {
             tunnelTimeoutWorkItem?.cancel()
@@ -1680,10 +2697,8 @@ public final class LiveShareManager: @unchecked Sendable {
 
         if let validURL = updatedURL {
             AppLog.liveShare.info("Public Live Share tunnel ready on host \(host, privacy: .private)")
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: Self.urlDidUpdateNotification, object: self, userInfo: ["url": validURL])
-                NotificationCenter.default.post(name: Self.stateDidChangeNotification, object: self)
-            }
+            notifyURLUpdate(validURL)
+            notifyStateChange()
         }
     }
 
@@ -1736,7 +2751,13 @@ public final class LiveShareManager: @unchecked Sendable {
         }
     }
 
-    public static func getLocalIPAddress() -> String? {
+    private func notifyURLUpdate(_ url: URL) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: Self.urlDidUpdateNotification, object: self, userInfo: ["url": url])
+        }
+    }
+
+    static func getLocalIPAddress() -> String? {
         var primaryAddress: String?
         var fallbackAddress: String?
         var ifaddr: UnsafeMutablePointer<ifaddrs>? = nil
@@ -1789,812 +2810,3 @@ public final class LiveShareManager: @unchecked Sendable {
 }
 
 
-private struct ReceiverWebAppHTML {
-    static func html(forToken token: String, encryptPayloads: Bool) -> String {
-        content
-            .replacingOccurrences(of: "__SESSION_BASE_PATH__", with: "/s/\(token)")
-            .replacingOccurrences(of: "__PAYLOAD_ENCRYPTED__", with: encryptPayloads ? "true" : "false")
-    }
-
-    static let content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Call Caption</title>
-        <style>
-            :root {
-                --bg: #0b0d12;
-                --card-bg: rgba(20, 24, 33, 0.82);
-                --card-border: rgba(255, 255, 255, 0.08);
-                --accent-blue: #38bdf8;
-                --accent-green: #34d399;
-                --accent-amber: #fbbf24;
-                --text-main: #f8fafc;
-                --text-sub: #94a3b8;
-                --font-size: 18px;
-            }
-            * { box-sizing: border-box; margin: 0; padding: 0; }
-            html, body {
-                background: var(--bg);
-                color: var(--text-main);
-                font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
-                -webkit-font-smoothing: antialiased;
-                -moz-osx-font-smoothing: grayscale;
-                text-rendering: optimizeLegibility;
-                min-height: 100vh;
-                overflow-x: hidden;
-                overflow-y: auto;
-            }
-            body { display: flex; flex-direction: column; }
-            header {
-                position: sticky;
-                top: 0;
-                background: rgba(11, 13, 18, 0.88);
-                backdrop-filter: blur(20px);
-                -webkit-backdrop-filter: blur(20px);
-                border-bottom: 1px solid var(--card-border);
-                padding: 12px 20px;
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                flex-wrap: wrap;
-                gap: 10px;
-                z-index: 20;
-            }
-            .brand { display: flex; align-items: center; gap: 10px; }
-            .brand-logo {
-                width: 26px;
-                height: 26px;
-                background: linear-gradient(135deg, #0284c7, #38bdf8);
-                border-radius: 7px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-weight: 700;
-                font-size: 11.5px;
-                letter-spacing: -0.02em;
-                color: white;
-            }
-            .brand-title {
-                font-weight: 600;
-                font-size: 14.5px;
-                letter-spacing: -0.015em;
-            }
-            .status-pill {
-                display: inline-flex;
-                align-items: center;
-                gap: 6px;
-                padding: 3px 9px;
-                border-radius: 999px;
-                font-size: 11px;
-                font-weight: 500;
-                background: rgba(52, 211, 153, 0.12);
-                color: var(--accent-green);
-                border: 1px solid rgba(52, 211, 153, 0.24);
-            }
-            .status-pill.offline {
-                background: rgba(239, 68, 68, 0.12);
-                color: #f87171;
-                border-color: rgba(239, 68, 68, 0.24);
-            }
-            .status-pill.paused {
-                background: rgba(251, 191, 36, 0.12);
-                color: var(--accent-amber);
-                border-color: rgba(251, 191, 36, 0.28);
-            }
-            .viewer-count {
-                color: var(--text-sub);
-                font-size: 11px;
-                min-width: 0;
-            }
-            .pulse-dot {
-                width: 6px;
-                height: 6px;
-                background: currentColor;
-                border-radius: 50%;
-            }
-            .controls { display: flex; align-items: center; gap: 6px; }
-            .btn {
-                background: rgba(255, 255, 255, 0.05);
-                border: 1px solid var(--card-border);
-                color: var(--text-main);
-                padding: 5px 10px;
-                border-radius: 7px;
-                font-size: 12px;
-                font-weight: 500;
-                cursor: pointer;
-                transition: all 0.15s ease;
-            }
-            .btn:hover { background: rgba(255, 255, 255, 0.10); }
-            .btn.active {
-                background: rgba(56, 189, 248, 0.16);
-                border-color: rgba(56, 189, 248, 0.34);
-                color: var(--accent-blue);
-            }
-            main {
-                flex: 1;
-                width: 100%;
-                padding: 20px 20px 90px 20px;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-            }
-            .caption-stream {
-                width: 100%;
-                max-width: 720px;
-                display: flex;
-                flex-direction: column;
-                gap: 12px;
-            }
-            .empty-state {
-                margin: 18vh auto;
-                text-align: center;
-                padding: 32px 20px;
-                color: var(--text-sub);
-            }
-            .empty-state h3 {
-                font-size: 14px;
-                font-weight: 500;
-                letter-spacing: -0.01em;
-                color: var(--text-sub);
-            }
-            .card {
-                background: var(--card-bg);
-                border: 1px solid var(--card-border);
-                border-radius: 12px;
-                padding: 14px 16px;
-                backdrop-filter: blur(10px);
-                -webkit-backdrop-filter: blur(10px);
-            }
-            .card.live {
-                border-color: rgba(56, 189, 248, 0.32);
-            }
-            .card-meta {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                margin-bottom: 6px;
-                font-size: 11px;
-            }
-            .speaker-badge {
-                font-weight: 600;
-                text-transform: uppercase;
-                letter-spacing: 0.04em;
-                font-size: 10.5px;
-            }
-            .speaker-host { color: var(--accent-blue); }
-            .speaker-caller { color: var(--accent-green); }
-            .untranslated-badge {
-                color: var(--accent-amber);
-                font-size: 10px;
-                margin-left: 6px;
-                font-weight: 500;
-            }
-            .time-label {
-                color: var(--text-sub);
-                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                font-variant-numeric: tabular-nums;
-            }
-            .translated-text {
-                font-size: var(--font-size);
-                font-weight: 400;
-                line-height: 1.36;
-                letter-spacing: -0.012em;
-                color: #f8fafc;
-                word-break: break-word;
-            }
-            .card.live .translated-text { color: #bae6fd; }
-            .original-text {
-                margin-top: 4px;
-                font-size: calc(var(--font-size) * 0.82);
-                font-weight: 400;
-                line-height: 1.32;
-                color: rgba(148, 163, 184, 0.78);
-                display: none;
-            }
-            body.show-orig .original-text { display: block; }
-            .floating-bottom {
-                position: fixed;
-                bottom: 18px;
-                left: 50%;
-                transform: translateX(-50%);
-                background: rgba(16, 19, 26, 0.92);
-                border: 1px solid var(--card-border);
-                backdrop-filter: blur(14px);
-                -webkit-backdrop-filter: blur(14px);
-                border-radius: 999px;
-                padding: 6px 14px;
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                z-index: 30;
-                user-select: none;
-            }
-            .jump-latest-btn {
-                background: rgba(56, 189, 248, 0.20);
-                border: 1px solid rgba(56, 189, 248, 0.40);
-                color: var(--accent-blue);
-                border-radius: 999px;
-                padding: 2px 9px;
-                font-size: 11px;
-                font-weight: 500;
-                cursor: pointer;
-                display: none;
-            }
-            .jump-latest-btn.visible {
-                display: inline-flex;
-                align-items: center;
-                gap: 4px;
-            }
-        </style>
-    </head>
-    <body class="show-orig">
-        <header>
-            <div class="brand">
-                <div class="brand-logo" aria-hidden="true">CC</div>
-                <div class="brand-title">Call Caption</div>
-                <div id="conn-pill" class="status-pill" role="status" aria-live="polite">
-                    <span class="pulse-dot" aria-hidden="true"></span>
-                    <span id="conn-label">Connecting</span>
-                </div>
-            </div>
-            <div class="controls">
-                <span id="viewer-count" class="viewer-count" aria-live="polite"></span>
-                <button id="view-mode-btn" class="btn active" aria-pressed="true" aria-label="Filter speakers">All</button>
-                <button id="orig-toggle-btn" class="btn active" aria-pressed="true" aria-label="Show original text">Original</button>
-                <button id="font-dec-btn" class="btn" aria-label="Decrease font size">A-</button>
-                <button id="font-inc-btn" class="btn" aria-label="Increase font size">A+</button>
-            </div>
-        </header>
-
-        <main id="main-scroll">
-            <div id="empty-state" class="empty-state">
-                <h3>Listening…</h3>
-            </div>
-            <div id="caption-stream" class="caption-stream" aria-live="polite"></div>
-        </main>
-
-        <div class="floating-bottom" id="autoscroll-pill">
-            <label for="autoscroll-toggle" style="font-size: 11.5px; color: var(--text-sub); cursor: pointer;">Auto-Scroll</label>
-            <input type="checkbox" id="autoscroll-toggle" checked style="accent-color: var(--accent-blue); cursor: pointer;">
-            <button id="jump-latest-btn" class="jump-latest-btn" type="button">↓ Latest</button>
-        </div>
-
-        <script>
-            const BASE_PATH = "__SESSION_BASE_PATH__";
-            const PAYLOAD_ENCRYPTED = __PAYLOAD_ENCRYPTED__;
-            const SESSION_KEY = (() => {
-                const match = location.hash.match(/[#&]k=([A-Za-z0-9_-]+)/);
-                return match ? match[1] : null;
-            })();
-            let sessionCryptoKey = null;
-            let decryptChain = Promise.resolve();
-            let linkErrorShown = false;
-            let hasDecryptedSuccessfully = false;
-            let lastSseSeq = 0;
-            let lastStateSeq = 0;
-            let lastClearEpoch = null;
-            let currentFontSize = 18;
-            let showOriginal = true;
-            let hostFocusMode = false;
-            let autoScroll = true;
-            let isProgrammaticScroll = false;
-            let hostPaused = false;
-
-            const streamContainer = document.getElementById('caption-stream');
-            const emptyState = document.getElementById('empty-state');
-            const emptyStateLabel = emptyState.querySelector('h3');
-            const connPill = document.getElementById('conn-pill');
-            const connLabel = document.getElementById('conn-label');
-            const viewerCountEl = document.getElementById('viewer-count');
-            const autoscrollToggle = document.getElementById('autoscroll-toggle');
-            const jumpLatestBtn = document.getElementById('jump-latest-btn');
-            const liveSlots = { 'You': null, 'Caller': null };
-
-            function isNearBottom() {
-                const docEl = document.scrollingElement || document.documentElement;
-                return (docEl.scrollHeight - (window.scrollY + window.innerHeight)) <= 90;
-            }
-
-            function scrollToBottom(instant = false) {
-                if (!autoScroll) return;
-                isProgrammaticScroll = true;
-                requestAnimationFrame(() => {
-                    const docEl = document.scrollingElement || document.documentElement;
-                    window.scrollTo({
-                        top: Math.max(docEl.scrollHeight, document.body.scrollHeight),
-                        behavior: instant ? 'auto' : 'smooth'
-                    });
-                    setTimeout(() => { isProgrammaticScroll = false; }, 220);
-                });
-            }
-
-            window.addEventListener('scroll', () => {
-                if (isProgrammaticScroll) return;
-                if (isNearBottom()) {
-                    if (!autoScroll) { autoScroll = true; autoscrollToggle.checked = true; }
-                    jumpLatestBtn.classList.remove('visible');
-                } else if (!autoScroll) {
-                    jumpLatestBtn.classList.add('visible');
-                }
-            }, { passive: true });
-
-            window.addEventListener('wheel', (e) => {
-                if (e.deltaY < -4 && !isNearBottom()) {
-                    autoScroll = false;
-                    autoscrollToggle.checked = false;
-                    jumpLatestBtn.classList.add('visible');
-                }
-            }, { passive: true });
-
-            window.addEventListener('touchmove', () => {
-                if (!isNearBottom()) {
-                    autoScroll = false;
-                    autoscrollToggle.checked = false;
-                    jumpLatestBtn.classList.add('visible');
-                }
-            }, { passive: true });
-
-            jumpLatestBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                autoScroll = true;
-                autoscrollToggle.checked = true;
-                jumpLatestBtn.classList.remove('visible');
-                scrollToBottom(false);
-            });
-
-            function base64urlToBytes(value) {
-                let base64 = value.replace(/-/g, '+').replace(/_/g, '/');
-                while (base64.length % 4 !== 0) base64 += '=';
-                const binary = atob(base64);
-                const bytes = new Uint8Array(binary.length);
-                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-                return bytes;
-            }
-
-            async function initSessionCrypto() {
-                if (!PAYLOAD_ENCRYPTED) return true;
-                if (!SESSION_KEY || !window.crypto || !window.crypto.subtle) return false;
-                try {
-                    const raw = base64urlToBytes(SESSION_KEY);
-                    if (raw.length !== 32) return false;
-                    sessionCryptoKey = await window.crypto.subtle.importKey(
-                        'raw', raw, { name: 'AES-GCM' }, false, ['decrypt']
-                    );
-                    return true;
-                } catch (err) {
-                    return false;
-                }
-            }
-
-            function makeReplayError(message) {
-                const err = new Error(message);
-                err.name = 'ReplayError';
-                return err;
-            }
-
-            async function decryptEnvelope(payload, expectedType, isSSE = false) {
-                const envelope = typeof payload === 'string' ? JSON.parse(payload) : payload;
-                if (!envelope || envelope.v !== 1 || typeof envelope.d !== 'string') {
-                    throw new Error('Unsupported envelope');
-                }
-                const hasMeta = envelope.t !== undefined || envelope.s !== undefined;
-                let additionalData;
-                if (hasMeta || expectedType) {
-                    if (typeof envelope.t !== 'string' || typeof envelope.s !== 'number' || !Number.isSafeInteger(envelope.s) || envelope.s < 0) {
-                        throw new Error('Invalid envelope metadata');
-                    }
-                    if (expectedType && envelope.t !== expectedType) {
-                        throw new Error('Unexpected envelope type');
-                    }
-                    if (isSSE) {
-                        if (envelope.s <= lastSseSeq) throw makeReplayError('Stale SSE sequence');
-                    } else if (expectedType === 'state') {
-                        if (envelope.s <= lastStateSeq) throw makeReplayError('Stale state sequence');
-                    }
-                    additionalData = new TextEncoder().encode(`v1:${envelope.t}:${envelope.s}`);
-                }
-                const combined = base64urlToBytes(envelope.d);
-                if (combined.length < 28) throw new Error('Invalid envelope');
-                const iv = combined.slice(0, 12);
-                const ciphertext = combined.slice(12);
-                const params = additionalData
-                    ? { name: 'AES-GCM', iv, additionalData }
-                    : { name: 'AES-GCM', iv };
-                const plaintext = await window.crypto.subtle.decrypt(
-                    params, sessionCryptoKey, ciphertext
-                );
-                if (hasMeta) {
-                    if (isSSE) lastSseSeq = envelope.s;
-                    else if (expectedType === 'state') lastStateSeq = envelope.s;
-                }
-                return new TextDecoder().decode(plaintext);
-            }
-
-            function showLinkError() {
-                if (linkErrorShown) return;
-                linkErrorShown = true;
-                stopPollingFallback();
-                if (eventSource) { eventSource.close(); eventSource = null; }
-                emptyState.style.display = '';
-                emptyStateLabel.textContent = 'This Live Link is incomplete or corrupted. Copy the full link including the #key fragment.';
-                connPill.className = 'status-pill offline';
-                connLabel.textContent = 'Link error';
-            }
-
-            function enqueueDecrypted(payload, handler, expectedType) {
-                if (!PAYLOAD_ENCRYPTED) {
-                    try { handler(JSON.parse(payload)); } catch (err) {}
-                    return;
-                }
-                decryptChain = decryptChain
-                    .then(async () => {
-                        const text = await decryptEnvelope(payload, expectedType, true);
-                        hasDecryptedSuccessfully = true;
-                        try {
-                            handler(JSON.parse(text));
-                        } catch (handlerErr) {}
-                    })
-                    .catch((err) => {
-                        if (err && err.name === 'ReplayError') return;
-                        if (!hasDecryptedSuccessfully) showLinkError();
-                    });
-            }
-
-            function setConnectionState(online, label) {
-                if (linkErrorShown) return;
-                if (online && hostPaused) {
-                    connPill.className = 'status-pill paused';
-                    connLabel.textContent = 'Paused';
-                    return;
-                }
-                connPill.className = online ? 'status-pill' : 'status-pill offline';
-                connLabel.textContent = label || (online ? 'Live' : 'Offline');
-            }
-
-            function updateViewerCount(count) {
-                if (typeof count !== 'number') return;
-                viewerCountEl.textContent = count > 0 ? (count === 1 ? '1 viewer' : count + ' viewers') : '';
-            }
-
-            function clearRenderedCards() {
-                streamContainer.innerHTML = '';
-                renderedIds.clear();
-                finalizedCardsById.clear();
-                liveSlots['You'] = null;
-                liveSlots['Caller'] = null;
-                emptyState.style.display = '';
-                emptyStateLabel.textContent = 'Listening…';
-            }
-
-            function handleStatusEvent(status) {
-                if (!status || typeof status !== 'object') return;
-                if (typeof status.clearEpoch === 'number') {
-                    if (lastClearEpoch !== null && status.clearEpoch !== lastClearEpoch && !status.clearAll && !status.clearCaller) {
-                        clearRenderedCards();
-                    }
-                    lastClearEpoch = status.clearEpoch;
-                }
-                if (typeof status.paused === 'boolean') {
-                    hostPaused = status.paused;
-                    setConnectionState(true, hostPaused ? 'Paused' : 'Live');
-                }
-                if (typeof status.viewerCount === 'number') updateViewerCount(status.viewerCount);
-                if (status.clearCaller) {
-                    streamContainer.querySelectorAll('[data-speaker="Caller"]').forEach(card => {
-                        const evictedId = card.getAttribute('data-event-id');
-                        if (evictedId) {
-                            finalizedCardsById.delete(evictedId);
-                            renderedIds.delete(evictedId);
-                        }
-                        card.remove();
-                    });
-                    liveSlots['Caller'] = null;
-                    if (streamContainer.children.length === 0) {
-                        emptyState.style.display = '';
-                        emptyStateLabel.textContent = 'Listening…';
-                    }
-                }
-                if (status.clearAll) {
-                    clearRenderedCards();
-                }
-            }
-
-            document.getElementById('font-inc-btn').addEventListener('click', () => {
-                currentFontSize = Math.min(30, currentFontSize + 2);
-                document.documentElement.style.setProperty('--font-size', currentFontSize + 'px');
-                scrollToBottom(true);
-            });
-            document.getElementById('font-dec-btn').addEventListener('click', () => {
-                currentFontSize = Math.max(13, currentFontSize - 2);
-                document.documentElement.style.setProperty('--font-size', currentFontSize + 'px');
-                scrollToBottom(true);
-            });
-            const origBtn = document.getElementById('orig-toggle-btn');
-            origBtn.addEventListener('click', () => {
-                showOriginal = !showOriginal;
-                document.body.classList.toggle('show-orig', showOriginal);
-                origBtn.classList.toggle('active', showOriginal);
-                origBtn.setAttribute('aria-pressed', showOriginal ? 'true' : 'false');
-                scrollToBottom(true);
-            });
-            const viewModeBtn = document.getElementById('view-mode-btn');
-            viewModeBtn.addEventListener('click', () => {
-                hostFocusMode = !hostFocusMode;
-                viewModeBtn.textContent = hostFocusMode ? 'Host' : 'All';
-                viewModeBtn.classList.toggle('active', !hostFocusMode);
-                viewModeBtn.setAttribute('aria-pressed', (!hostFocusMode) ? 'true' : 'false');
-                streamContainer.querySelectorAll('.card').forEach(c => {
-                    c.style.display = (hostFocusMode && c.getAttribute('data-speaker') === 'Caller') ? 'none' : 'block';
-                });
-                scrollToBottom(true);
-            });
-            autoscrollToggle.addEventListener('change', (e) => {
-                autoScroll = e.target.checked;
-                if (autoScroll) {
-                    jumpLatestBtn.classList.remove('visible');
-                    scrollToBottom(false);
-                }
-            });
-
-            function createCardElement(speaker, isLive) {
-                emptyState.style.display = 'none';
-                const card = document.createElement('div');
-                card.className = isLive ? 'card live' : 'card';
-                card.setAttribute('data-speaker', speaker);
-                const isHost = (speaker === 'You');
-                card.innerHTML = `
-                    <div class="card-meta">
-                        <div>
-                            <span class="speaker-badge ${isHost ? 'speaker-host' : 'speaker-caller'}">${isHost ? 'HOST' : 'CALLER'}</span>
-                            <span class="untranslated-badge" style="display:none;">[Untranslated]</span>
-                        </div>
-                        <span class="time-label">Live</span>
-                    </div>
-                    <div class="translated-text" dir="auto"></div>
-                    <div class="original-text" dir="auto"></div>
-                `;
-                if (hostFocusMode && speaker === 'Caller') card.style.display = 'none';
-                return card;
-            }
-
-            function evictOldCardsIfNeeded() {
-                let cursor = streamContainer.firstElementChild;
-                while (streamContainer.children.length > 80 && cursor) {
-                    const next = cursor.nextElementSibling;
-                    if (!cursor.classList.contains('live')) {
-                        const evictedId = cursor.getAttribute('data-event-id');
-                        if (evictedId) finalizedCardsById.delete(evictedId);
-                        streamContainer.removeChild(cursor);
-                    }
-                    cursor = next;
-                }
-            }
-
-            function getOrCreateLiveCard(speaker) {
-                if (liveSlots[speaker] && document.body.contains(liveSlots[speaker])) return liveSlots[speaker];
-                const card = createCardElement(speaker, true);
-                streamContainer.appendChild(card);
-                evictOldCardsIfNeeded();
-                liveSlots[speaker] = card;
-                return card;
-            }
-
-            const renderedIds = new Set();
-            const finalizedCardsById = new Map();
-
-            function populateCardContent(card, ev) {
-                const untransBadge = card.querySelector('.untranslated-badge');
-                if (untransBadge) {
-                    untransBadge.style.display = ev.isUntranslated ? 'inline' : 'none';
-                }
-                card.querySelector('.translated-text').textContent = ev.translatedText || ev.originalText;
-                const origEl = card.querySelector('.original-text');
-                origEl.textContent = (!ev.isUntranslated && ev.originalText && ev.originalText.toLowerCase() !== (ev.translatedText || '').toLowerCase()) ? ev.originalText : '';
-                card.setAttribute('data-orig', ev.originalText || '');
-                card.setAttribute('data-event-id', ev.id || '');
-                const timeEl = card.querySelector('.time-label');
-                if (ev.isFinal) {
-                    card.classList.remove('live');
-                    timeEl.textContent = ev.timestamp;
-                } else {
-                    timeEl.textContent = 'Live';
-                }
-            }
-
-            function handleCaptionEvent(ev, isBatchHistory = false) {
-                if (!ev.translatedText && !ev.originalText) return;
-                if (ev.id && renderedIds.has(ev.id)) {
-                    if (ev.isFinal) {
-                        const existingCard = finalizedCardsById.get(ev.id);
-                        if (existingCard && document.body.contains(existingCard)) populateCardContent(existingCard, ev);
-                    }
-                    return;
-                }
-                if (ev.isFinal && ev.id) {
-                    renderedIds.add(ev.id);
-                    if (renderedIds.size > 200) {
-                        const oldest = renderedIds.values().next().value;
-                        renderedIds.delete(oldest);
-                        finalizedCardsById.delete(oldest);
-                    }
-                }
-                if (ev.isFinal) {
-                    const activeLive = liveSlots[ev.speaker];
-                    let card = null;
-                    if (activeLive && document.body.contains(activeLive)) {
-                        const liveId = activeLive.getAttribute('data-event-id') || '';
-                        if (ev.id && liveId && liveId === ev.id) {
-                            card = activeLive;
-                            liveSlots[ev.speaker] = null;
-                        } else {
-                            card = createCardElement(ev.speaker, false);
-                            streamContainer.insertBefore(card, activeLive);
-                        }
-                    } else {
-                        card = createCardElement(ev.speaker, false);
-                        streamContainer.appendChild(card);
-                    }
-                    populateCardContent(card, ev);
-                    if (ev.id) finalizedCardsById.set(ev.id, card);
-                    evictOldCardsIfNeeded();
-                } else {
-                    populateCardContent(getOrCreateLiveCard(ev.speaker), ev);
-                }
-                if (!isBatchHistory) scrollToBottom(false);
-            }
-
-            let eventSource = null;
-            let pollTimeout = null;
-            let isPollingActive = false;
-            let pollDelayMs = 1500;
-            let pollCycleToken = 0;
-
-            function scheduleNextPoll(token) {
-                if (!isPollingActive || token !== pollCycleToken) return;
-                if (pollTimeout) clearTimeout(pollTimeout);
-                pollTimeout = setTimeout(() => {
-                    pollTimeout = null;
-                    runPollCycle(token);
-                }, pollDelayMs);
-            }
-
-            async function runPollCycle(token) {
-                if (!isPollingActive || token !== pollCycleToken) return;
-                const shouldContinue = await pollState(token);
-                if (shouldContinue && isPollingActive && token === pollCycleToken) {
-                    scheduleNextPoll(token);
-                }
-            }
-
-            function startPollingFallback() {
-                if (isPollingActive || linkErrorShown) return;
-                isPollingActive = true;
-                pollDelayMs = 1500;
-                pollCycleToken += 1;
-                runPollCycle(pollCycleToken);
-            }
-
-            function stopPollingFallback() {
-                isPollingActive = false;
-                pollCycleToken += 1;
-                if (pollTimeout) { clearTimeout(pollTimeout); pollTimeout = null; }
-            }
-
-            function connectSSE() {
-                if (eventSource) eventSource.close();
-                eventSource = new EventSource(BASE_PATH + '/events');
-                eventSource.onopen = () => { stopPollingFallback(); setConnectionState(true, 'Live'); };
-                eventSource.addEventListener('history', (e) => {
-                    enqueueDecrypted(e.data, (history) => {
-                        ['Caller', 'You'].forEach(sp => {
-                            if (liveSlots[sp] && document.body.contains(liveSlots[sp])) {
-                                liveSlots[sp].remove();
-                            }
-                            liveSlots[sp] = null;
-                        });
-                        if (history && history.length > 0) {
-                            emptyState.style.display = 'none';
-                            history.forEach(item => handleCaptionEvent(item, true));
-                            scrollToBottom(true);
-                        } else if (streamContainer.children.length === 0) {
-                            emptyState.style.display = '';
-                        }
-                    }, 'history');
-                });
-                eventSource.addEventListener('caption', (e) => {
-                    enqueueDecrypted(e.data, (ev) => handleCaptionEvent(ev, false), 'caption');
-                });
-                eventSource.addEventListener('status', (e) => {
-                    enqueueDecrypted(e.data, handleStatusEvent, 'status');
-                });
-                eventSource.onerror = () => {
-                    if (!eventSource || linkErrorShown) return;
-                    setConnectionState(false, 'Reconnecting');
-                    startPollingFallback();
-                };
-            }
-
-            async function pollState(token) {
-                let envelope;
-                try {
-                    const res = await fetch(BASE_PATH + '/api/state');
-                    if (!isPollingActive || token !== pollCycleToken) return false;
-                    if (res.status === 403 || res.status === 404) {
-                        if (eventSource) { eventSource.close(); eventSource = null; }
-                        stopPollingFallback();
-                        setConnectionState(false, 'Session ended');
-                        return false;
-                    }
-                    if (!res.ok) {
-                        setConnectionState(false, 'Reconnecting');
-                        pollDelayMs = Math.min(15000, pollDelayMs * 2);
-                        return true;
-                    }
-                    envelope = await res.json();
-                    if (!isPollingActive || token !== pollCycleToken) return false;
-                } catch (e) {
-                    if (!isPollingActive || token !== pollCycleToken) return false;
-                    setConnectionState(false, 'Reconnecting');
-                    pollDelayMs = Math.min(15000, pollDelayMs * 2);
-                    return true;
-                }
-                let data;
-                if (PAYLOAD_ENCRYPTED) {
-                    try {
-                        data = JSON.parse(await decryptEnvelope(envelope, 'state', false));
-                        hasDecryptedSuccessfully = true;
-                        if (!isPollingActive || token !== pollCycleToken) return false;
-                    } catch (e) {
-                        if (e && e.name === 'ReplayError') return true;
-                        if (!hasDecryptedSuccessfully) showLinkError();
-                        return !hasDecryptedSuccessfully ? false : true;
-                    }
-                } else {
-                    data = envelope;
-                }
-                pollDelayMs = 1500;
-                setConnectionState(true, 'Live');
-                if (typeof data.clearEpoch === 'number') {
-                    if (lastClearEpoch !== null && data.clearEpoch !== lastClearEpoch) {
-                        clearRenderedCards();
-                    }
-                    lastClearEpoch = data.clearEpoch;
-                }
-                if (Array.isArray(data.history) && data.history.length > 0) {
-                    data.history.forEach(item => handleCaptionEvent(item, true));
-                }
-                if (data.callerPartial) {
-                    handleCaptionEvent(data.callerPartial, false);
-                } else if (liveSlots['Caller']) {
-                    if (document.body.contains(liveSlots['Caller'])) liveSlots['Caller'].remove();
-                    liveSlots['Caller'] = null;
-                }
-                if (data.micPartial) {
-                    handleCaptionEvent(data.micPartial, false);
-                } else if (liveSlots['You']) {
-                    if (document.body.contains(liveSlots['You'])) liveSlots['You'].remove();
-                    liveSlots['You'] = null;
-                }
-                if (streamContainer.children.length === 0) {
-                    emptyState.style.display = '';
-                }
-                handleStatusEvent({ paused: !!data.isPaused, viewerCount: data.viewerCount });
-                scrollToBottom(false);
-                return true;
-            }
-
-            (async () => {
-                if (!(await initSessionCrypto())) {
-                    showLinkError();
-                    return;
-                }
-                connectSSE();
-            })();
-        </script>
-    </body>
-    </html>
-    """
-}

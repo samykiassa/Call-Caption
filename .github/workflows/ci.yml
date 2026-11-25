@@ -19,7 +19,7 @@ jobs:
 
       - name: Validate Plists & Strings
         run: |
-          plutil -lint Resources/Info.plist Resources/PrivacyInfo.xcprivacy Resources/CallCaption.entitlements Resources/*.lproj/*.strings
+          plutil -lint Resources/Info.plist Resources/PrivacyInfo.xcprivacy Resources/CallCaption.entitlements Resources/*.lproj/*.strings Resources/*.lproj/*.stringsdict
 
       - name: Build
         run: ./build.sh

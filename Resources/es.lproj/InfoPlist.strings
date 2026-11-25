@@ -2,3 +2,4 @@
 "NSSpeechRecognitionUsageDescription" = "Transcribir audio en tu Mac.";
 "NSMicrophoneUsageDescription" = "Transcribir y traducir el audio de tu micrófono.";
 "NSAudioCaptureUsageDescription" = "Capturar el audio del sistema para transcribir y traducir llamadas.";
+"NSHumanReadableCopyright" = "Copyright © 2026 Call Caption. Todos los derechos reservados.";

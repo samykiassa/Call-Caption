@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>share.viewers.a11y</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@viewers@</string>
+		<key>viewers</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>%ld espectador activo</string>
+			<key>many</key>
+			<string>%ld espectadores activos</string>
+			<key>other</key>
+			<string>%ld espectadores activos</string>
+		</dict>
+	</dict>
+	<key>share.viewers.help</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@viewers@</string>
+		<key>viewers</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>%ld espectador activo</string>
+			<key>many</key>
+			<string>%ld espectadores activos</string>
+			<key>other</key>
+			<string>%ld espectadores activos</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

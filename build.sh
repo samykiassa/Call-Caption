@@ -14,7 +14,7 @@ CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 WORK_DIR=""
 
 if [ "${1:-}" = "clean" ]; then
-    rm -rf "$APP_BUNDLE" "$DIR/$APP_NAME.dSYM" "$DIR/.build" "$DIR/.dmg_staging" "$DIR"/.DS_Store "$DIR/AudioTapHelper.o" "$DIR/CallCaptionSwift.o"
+    rm -rf "$APP_BUNDLE" "$DIR/$APP_NAME.dSYM" "$DIR/.build" "$DIR/.dmg_staging" "$DIR"/.DS_Store "$DIR/AudioTapHelper.o" "$DIR/CallCaptionSwift.o" "$DIR/main"
     exit 0
 fi
 
@@ -93,6 +93,7 @@ swiftc \
     -framework Network \
     -framework Security \
     -framework CryptoKit \
+    -Xlinker -dead_strip \
     -o "$MACOS_DIR/$EXECUTABLE_NAME"
 
 dsymutil "$MACOS_DIR/$EXECUTABLE_NAME" -o "$DIR/$APP_NAME.dSYM"
@@ -100,7 +101,7 @@ rm -f "$OBJ_HELPER" "$SWIFT_OBJ"
 
 strip -Sx "$MACOS_DIR/$EXECUTABLE_NAME"
 
-chmod -R u+rwX,go+rX "$APP_BUNDLE"
+chmod -R u=rwX,go=rX "$APP_BUNDLE"
 xattr -cr "$APP_BUNDLE" 2>/dev/null || true
 
 if [ "$CODESIGN_IDENTITY" = "-" ]; then
@@ -113,5 +114,7 @@ else
         --entitlements "$DIR/Resources/CallCaption.entitlements" \
         "$APP_BUNDLE"
 fi
+
+printf '%s\n' "${DEPLOYMENT_TARGET}|${CODESIGN_IDENTITY}" > "$DIR/.build/last_build_env"
 
 echo "Successfully built: $APP_BUNDLE"

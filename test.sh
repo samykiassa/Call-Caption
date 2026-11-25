@@ -10,12 +10,10 @@ DEPLOYMENT_TARGET="${DEPLOYMENT_TARGET:-arm64-apple-macos26.0}"
 TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/callcaption-tests.XXXXXX")"
 OBJ_HELPER="$TEST_DIR/AudioTapHelper_test.o"
 TEST_BIN="$TEST_DIR/TestRunner"
-TEST_SUITE="com.callcaption.tests.$$"
 
 cleanup() {
     rm -f "$OBJ_HELPER" "$TEST_BIN"
     rm -rf "$TEST_DIR"
-    defaults delete "$TEST_SUITE" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -64,7 +62,24 @@ swiftc \
     ${SWIFT_SANITIZER_FLAGS[@]+"${SWIFT_SANITIZER_FLAGS[@]}"} \
     -o "$TEST_BIN"
 
+mkdir -p "$TEST_DIR/CallCaptionTest.bundle/Contents/Resources"
+cp -R "$DIR/Resources/"*.lproj "$TEST_DIR/CallCaptionTest.bundle/Contents/Resources/"
+cat > "$TEST_DIR/CallCaptionTest.bundle/Contents/Info.plist" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.callcaption.testresources</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+</dict>
+</plist>
+PLIST
+
 CALLCAPTION_TEST=1 \
 CALLCAPTION_TEST_DIR="$TEST_DIR" \
-CALLCAPTION_TEST_SUITE="$TEST_SUITE" \
+CALLCAPTION_RESOURCE_BUNDLE="$TEST_DIR/CallCaptionTest.bundle" \
 "$TEST_BIN"
